@@ -1851,8 +1851,7 @@ git commit -m "feat: add gatekeeper with read detection and anti-deadlock releas
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/ledger.test.ts
-import { existsSync, mkdtempSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -1886,21 +1885,38 @@ describe("Ledger", () => {
   it("skips malformed lines instead of throwing", () => {
     const ledger = new Ledger(dir());
     ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
-    ledger.appendRaw("{ not json\n");
+    appendFileSync(ledger.file, "{ not json\n", "utf8");
+    expect(ledger.read()).toHaveLength(1);
+  });
+
+  it("drops a line missing the field its aggregator reads", () => {
+    const ledger = new Ledger(dir());
+    ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
+    appendFileSync(ledger.file, `${JSON.stringify({ type: "read", ts: 2 })}\n`, "utf8");
+    expect(ledger.read()).toHaveLength(1);
+    expect([...ledger.stats().keys()]).toEqual(["alpha"]);
+  });
+
+  it("drops a line whose type is not a known event", () => {
+    const ledger = new Ledger(dir());
+    ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
+    appendFileSync(ledger.file, `${JSON.stringify({ type: "nonsense", skill: "alpha" })}\n`, "utf8");
     expect(ledger.read()).toHaveLength(1);
   });
 
   it("purges the log file", () => {
-    const root = dir();
-    const ledger = new Ledger(root);
+    const ledger = new Ledger(dir());
     ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
     expect(existsSync(ledger.file)).toBe(true);
     ledger.purge();
+    expect(existsSync(ledger.file)).toBe(false);
     expect(ledger.read()).toEqual([]);
   });
 
   it("swallows write failures so routing is never interrupted", () => {
-    const ledger = new Ledger("/proc/definitely/not/writable");
+    const blocker = join(dir(), "not-a-directory");
+    writeFileSync(blocker, "");
+    const ledger = new Ledger(blocker);
     expect(() => ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" })).not.toThrow();
     expect(ledger.read()).toEqual([]);
   });
@@ -1919,33 +1935,59 @@ Expected: FAIL — cannot find module `../src/ledger.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/ledger.ts
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { LedgerEvent, SkillStats } from "./types.js";
+
+/** On-disk name of the active log. Named here so purge and any tooling agree on one contract. */
+export const LEDGER_FILENAME = "events.jsonl";
+/** Name of the single retained previous log. */
+export const LEDGER_PREVIOUS_FILENAME = "events.1.jsonl";
+/**
+ * Rotate once the active log passes this size. A matched prompt writes up to three lines, so a
+ * daily driver would otherwise grow this file forever and every report would re-read all of it.
+ */
+const MAX_LEDGER_BYTES = 2 * 1024 * 1024;
+
+const KNOWN_TYPES = new Set<LedgerEvent["type"]>(["inject", "read", "block", "error"]);
+
+/**
+ * A line is only an event if it carries a known type and the field its aggregator reads. A
+ * half-written or hand-edited line would otherwise reach stats() and appear there as a skill
+ * literally named "undefined".
+ */
+function isEvent(value: unknown): value is LedgerEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const event = value as { type?: unknown; skill?: unknown; where?: unknown };
+  if (!KNOWN_TYPES.has(event.type as LedgerEvent["type"])) return false;
+  return event.type === "error" ? typeof event.where === "string" : typeof event.skill === "string";
+}
 
 /** Append-only local event log. Every method swallows its own errors: telemetry never breaks routing. */
 export class Ledger {
   readonly file: string;
+  private readonly previousFile: string;
+  private dirReady = false;
 
   constructor(private readonly dir: string) {
-    this.file = join(dir, "events.jsonl");
+    this.file = join(dir, LEDGER_FILENAME);
+    this.previousFile = join(dir, LEDGER_PREVIOUS_FILENAME);
   }
 
   append(event: LedgerEvent): void {
-    this.appendRaw(`${JSON.stringify(event)}\n`);
-  }
-
-  /** Exposed for tests that need to write a malformed line. */
-  appendRaw(line: string): void {
     try {
-      mkdirSync(this.dir, { recursive: true });
-      appendFileSync(this.file, line, "utf8");
+      if (!this.dirReady) {
+        mkdirSync(this.dir, { recursive: true });
+        this.dirReady = true;
+      }
+      this.rotateIfLarge();
+      appendFileSync(this.file, `${JSON.stringify(event)}\n`, "utf8");
     } catch {
       // Intentionally ignored.
     }
   }
 
+  /** Reads the active log only, so reports describe recent activity rather than all history. */
   read(): LedgerEvent[] {
     let raw: string;
     try {
@@ -1958,8 +2000,8 @@ export class Ledger {
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
       try {
-        const parsed = JSON.parse(line) as LedgerEvent;
-        if (typeof parsed?.type === "string") events.push(parsed);
+        const parsed: unknown = JSON.parse(line);
+        if (isEvent(parsed)) events.push(parsed);
       } catch {
         continue;
       }
@@ -1969,7 +2011,7 @@ export class Ledger {
 
   stats(): Map<string, SkillStats> {
     const stats = new Map<string, SkillStats>();
-    const bump = (skill: string): SkillStats => {
+    const statsFor = (skill: string): SkillStats => {
       let entry = stats.get(skill);
       if (!entry) {
         entry = { injections: 0, reads: 0, blocks: 0 };
@@ -1980,7 +2022,7 @@ export class Ledger {
 
     for (const event of this.read()) {
       if (event.type === "error") continue;
-      const entry = bump(event.skill);
+      const entry = statsFor(event.skill);
       if (event.type === "inject") entry.injections += 1;
       else if (event.type === "read") entry.reads += 1;
       else if (event.type === "block") entry.blocks += 1;
@@ -1988,11 +2030,22 @@ export class Ledger {
     return stats;
   }
 
+  /** Removes both the active log and the retained previous one. */
   purge(): void {
     try {
       rmSync(this.file, { force: true });
+      rmSync(this.previousFile, { force: true });
     } catch {
       // Intentionally ignored.
+    }
+  }
+
+  private rotateIfLarge(): void {
+    try {
+      if (statSync(this.file).size < MAX_LEDGER_BYTES) return;
+      renameSync(this.file, this.previousFile);
+    } catch {
+      // No active log yet, or the rename failed; either way appending is still correct.
     }
   }
 }
@@ -2001,7 +2054,7 @@ export class Ledger {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/ledger.test.ts`
-Expected: PASS, 6 tests.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Commit**
 
