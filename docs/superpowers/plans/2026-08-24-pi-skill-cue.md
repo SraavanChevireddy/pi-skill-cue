@@ -1592,7 +1592,6 @@ git commit -m "feat: add budget-capped directive injector with per-session dedup
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/gatekeeper.test.ts
 import { describe, expect, it } from "vitest";
 import { Gatekeeper } from "../src/gatekeeper.js";
 import { DEFAULT_CONFIG, type CueConfig, type SkillRecord } from "../src/types.js";
@@ -1654,7 +1653,7 @@ describe("Gatekeeper", () => {
     expect(keeper.check("write")).toBeUndefined();
   });
 
-  it("counts consecutive blocks per tool, not globally", () => {
+  it("counts blocks per tool, not globally", () => {
     const keeper = new Gatekeeper(gated(), [tdd]);
     keeper.check("write");
     keeper.check("write");
@@ -1674,7 +1673,52 @@ describe("Gatekeeper", () => {
   it("reports which skills have been read for injector dedupe", () => {
     const keeper = new Gatekeeper(gated(), [tdd]);
     keeper.noteRead("/fixtures/test-driven-development/SKILL.md");
-    expect(keeper.readSkills()).toEqual(new Set(["test-driven-development"]));
+    expect(keeper.satisfiedSkills()).toEqual(new Set(["test-driven-development"]));
+  });
+
+  it("stops blocking permanently once it releases", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    expect(keeper.check("write")?.block).toBe(true);
+    expect(keeper.check("write")?.block).toBe(true);
+    expect(keeper.check("write")).toBeUndefined();
+    expect(keeper.check("write")).toBeUndefined();
+    expect(keeper.check("write")).toBeUndefined();
+  });
+
+  it("accepts a differently written path for the same file", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    keeper.noteRead("/fixtures/test-driven-development/../test-driven-development/SKILL.md");
+    expect(keeper.check("write")).toBeUndefined();
+  });
+
+  it("does not satisfy a gate by reading another file inside the skill's directory", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    keeper.noteRead("/fixtures/test-driven-development/references/details.md");
+    expect(keeper.check("write")?.block).toBe(true);
+  });
+
+  it("never blocks while the extension is disabled", () => {
+    const keeper = new Gatekeeper({ ...gated(), enabled: false }, [tdd]);
+    expect(keeper.check("write")).toBeUndefined();
+  });
+
+  it("reports a skill satisfied by a /skill: invocation as satisfied", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    keeper.markSatisfied("test-driven-development");
+    expect(keeper.satisfiedSkills()).toEqual(new Set(["test-driven-development"]));
+  });
+
+  it("lets the first gate in config order win when two guard the same tool", () => {
+    const other: SkillRecord = { ...tdd, name: "brainstorming", path: "/fixtures/brainstorming/SKILL.md" };
+    const config: CueConfig = {
+      ...DEFAULT_CONFIG,
+      gates: {
+        "test-driven-development": { tools: ["write"] },
+        brainstorming: { tools: ["write"] },
+      },
+    };
+    const keeper = new Gatekeeper(config, [tdd, other]);
+    expect(keeper.check("write")?.skill).toBe("test-driven-development");
   });
 });
 ```
@@ -1687,7 +1731,7 @@ Expected: FAIL — cannot find module `../src/gatekeeper.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/gatekeeper.ts
+import { resolve } from "node:path";
 import type { CueConfig, SkillRecord } from "./types.js";
 
 export interface BlockDecision {
@@ -1696,15 +1740,26 @@ export interface BlockDecision {
   skill: string;
 }
 
-/** Consecutive blocks of the same tool before the gate releases, to avoid trapping the agent. */
+/**
+ * Blocks of one tool by one gate before that gate gives up for the rest of the session.
+ * Releasing permanently is deliberate: a gate is a nudge with teeth, not a security control, and
+ * an agent that can be blocked indefinitely burns tokens and user trust. Note the cost is per
+ * gate, so two unsatisfied gates on the same tool can block it this many times each.
+ */
 const RELEASE_AFTER = 2;
+
+/** Composite key for the per-gate, per-tool block counter. */
+function gateKey(skill: string, tool: string): string {
+  return `${skill}\u0000${tool}`;
+}
 
 /** Per-session gate state. One instance per pi session. */
 export class Gatekeeper {
   private readonly satisfied = new Set<string>();
-  private readonly consecutive = new Map<string, number>();
-  private readonly byPath = new Map<string, string>();
-  private readonly installed = new Map<string, SkillRecord>();
+  private readonly blocksByGateTool = new Map<string, number>();
+  private readonly byResolvedPath = new Map<string, string>();
+  /** Skills eligible to gate: installed, and not muted. */
+  private readonly gateable = new Map<string, SkillRecord>();
 
   constructor(
     private readonly config: CueConfig,
@@ -1713,8 +1768,8 @@ export class Gatekeeper {
     const muted = new Set(config.mute);
     for (const record of records) {
       if (muted.has(record.name)) continue;
-      this.installed.set(record.name, record);
-      this.byPath.set(record.path, record.name);
+      this.gateable.set(record.name, record);
+      this.byResolvedPath.set(resolve(record.path), record.name);
     }
   }
 
@@ -1723,31 +1778,43 @@ export class Gatekeeper {
     this.satisfied.add(name);
   }
 
-  /** Observe a read tool call; satisfies the gate when the path is a known SKILL.md. */
+  /**
+   * Observe a read tool call. Paths are resolved on both sides so a relative path satisfies the
+   * gate. Only the SKILL.md itself counts: reading a skill's reference file is not reading the skill.
+   */
   noteRead(path: string): void {
-    const name = this.byPath.get(path);
+    const name = this.byResolvedPath.get(resolve(path));
     if (name) this.satisfied.add(name);
   }
 
-  /** Skills read this session, used by the injector to avoid repeat injections. */
-  readSkills(): Set<string> {
+  /**
+   * Skills that no longer need injecting or gating this session, whether satisfied by a read or by
+   * an explicit /skill: invocation. The injector uses this to avoid repeating itself.
+   */
+  satisfiedSkills(): Set<string> {
     return new Set(this.satisfied);
   }
 
-  /** Decide whether a tool call is blocked. Returns undefined to allow. */
+  /**
+   * Decide whether a tool call is blocked. Returns undefined to allow.
+   * When several gates guard the same tool, the first one in config order wins.
+   */
   check(tool: string): BlockDecision | undefined {
+    if (!this.config.enabled) return undefined;
+
     for (const [name, gate] of Object.entries(this.config.gates)) {
       if (!gate.tools.includes(tool)) continue;
-      const record = this.installed.get(name);
+      const record = this.gateable.get(name);
       if (!record || this.satisfied.has(name)) continue;
 
-      const key = `${name}:${tool}`;
-      const seen = this.consecutive.get(key) ?? 0;
-      if (seen >= RELEASE_AFTER) {
-        this.consecutive.set(key, 0);
+      const key = gateKey(name, tool);
+      const blocks = this.blocksByGateTool.get(key) ?? 0;
+      if (blocks >= RELEASE_AFTER) {
+        // Give up permanently rather than resetting the counter, which would re-arm the trap.
+        this.satisfied.add(name);
         continue;
       }
-      this.consecutive.set(key, seen + 1);
+      this.blocksByGateTool.set(key, blocks + 1);
 
       return {
         block: true,
@@ -1755,6 +1822,7 @@ export class Gatekeeper {
         reason: `Gated by pi-skill-cue: read the \`${name}\` skill at ${record.path} before using ${tool}. Run /cue off to disable gating for this session.`,
       };
     }
+
     return undefined;
   }
 }
@@ -1763,7 +1831,7 @@ export class Gatekeeper {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/gatekeeper.test.ts`
-Expected: PASS, 11 tests.
+Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -2415,7 +2483,7 @@ export class CueRuntime {
       if (this.records.length === 0) return undefined;
 
       const matches = scoreSkills(this.records, { prompt, cwdExtensions }, this.options.config);
-      const directive = buildDirective(matches, this.gatekeeper.readSkills());
+      const directive = buildDirective(matches, this.gatekeeper.satisfiedSkills());
       if (!directive) return undefined;
 
       for (const match of matches) {
@@ -2446,9 +2514,9 @@ export class CueRuntime {
       if (!this.enabled || !this.gatekeeper) return undefined;
 
       if (tool === "read" && typeof input.path === "string") {
-        const before = this.gatekeeper.readSkills();
+        const before = this.gatekeeper.satisfiedSkills();
         this.gatekeeper.noteRead(input.path);
-        for (const name of this.gatekeeper.readSkills()) {
+        for (const name of this.gatekeeper.satisfiedSkills()) {
           if (before.has(name)) continue;
           this.ledger.append({ type: "read", ts: Date.now(), session: this.options.sessionId, skill: name });
         }
