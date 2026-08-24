@@ -1086,6 +1086,7 @@ The engine. Pure, deterministic, normalised to 0..1 so `threshold` means the sam
 // tests/scorer.test.ts
 import { describe, expect, it } from "vitest";
 import { scoreSkills } from "../src/scorer.js";
+import { extractTriggerPhrases, tokenize } from "../src/text.js";
 import { DEFAULT_CONFIG, type CueConfig, type SkillRecord } from "../src/types.js";
 
 function record(name: string, description: string): SkillRecord {
@@ -1099,9 +1100,8 @@ function record(name: string, description: string): SkillRecord {
   };
 }
 
+/** Mirrors what buildCatalog derives, kept local so the scorer test needs no filesystem. */
 function withDerived(r: SkillRecord): SkillRecord {
-  // Mirrors what buildCatalog derives, kept local so the scorer test needs no fs.
-  const { extractTriggerPhrases, tokenize } = require("../src/text.js");
   return {
     ...r,
     triggerPhrases: extractTriggerPhrases(r.description),
