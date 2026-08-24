@@ -13,6 +13,13 @@ export interface SkillRecord {
   mtimeMs: number;
 }
 
+/**
+ * Why a skill matched.
+ * - "trigger": a "use when ..." phrase from the skill's own description matched.
+ * - "regex":   a user-configured regex from config.triggers matched.
+ * - "terms":   IDF-weighted term overlap between prompt and skill.
+ * - "context": a signal from the working directory matched.
+ */
 export type MatchReasonKind = "trigger" | "regex" | "terms" | "context";
 
 export interface MatchReason {
@@ -50,22 +57,41 @@ export interface CueConfig {
   triggers: Record<string, string[]>;
   /** Skill name → gate configuration. */
   gates: Record<string, GateConfig>;
-  escalate: { enabled: boolean; model: string | null };
+  escalate: EscalateConfig;
 }
 
-export const DEFAULT_CONFIG: CueConfig = {
-  enabled: true,
-  maxSkills: 3,
-  threshold: 0.35,
-  verbose: false,
-  mute: [],
-  triggers: {},
-  gates: {},
-  escalate: { enabled: false, model: null },
-};
+export interface EscalateConfig {
+  enabled: boolean;
+  /** Model id to consult, or null to use the session's active model. */
+  model: string | null;
+}
+
+export function createDefaultConfig(): CueConfig {
+  return {
+    enabled: true,
+    maxSkills: 3,
+    threshold: 0.35,
+    verbose: false,
+    mute: [],
+    triggers: {},
+    gates: {},
+    escalate: { enabled: false, model: null },
+  };
+}
+
+/** Convenience snapshot for reads and assertions. Never mutate it; call createDefaultConfig() to own a copy. */
+export const DEFAULT_CONFIG: CueConfig = createDefaultConfig();
 
 export type LedgerEvent =
-  | { type: "inject"; ts: number; session: string; skill: string; score: number; reason: string }
+  | {
+      type: "inject";
+      ts: number;
+      session: string;
+      skill: string;
+      score: number;
+      /** `detail` of the highest-weighted MatchReason for this injection, e.g. the matched "use when" phrase. */
+      reason: string;
+    }
   | { type: "read"; ts: number; session: string; skill: string }
   | { type: "block"; ts: number; session: string; skill: string; tool: string }
   | { type: "error"; ts: number; session: string; where: string; message: string };
