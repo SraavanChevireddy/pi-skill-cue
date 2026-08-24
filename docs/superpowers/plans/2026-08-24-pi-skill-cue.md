@@ -353,8 +353,16 @@ describe("tokenize", () => {
     expect(tokenize("Fix the Login-Bug in api_v2")).toEqual(["fix", "login", "bug", "api"]);
   });
 
-  it("drops stopwords that carry no routing signal", () => {
-    expect(tokenize("use this when you are the one that has code")).toEqual([]);
+  it("drops filler but keeps domain words", () => {
+    expect(tokenize("please help me refactor the authentication module")).toEqual([
+      "refactor",
+      "authentication",
+      "module",
+    ]);
+  });
+
+  it("folds diacritics instead of shredding accented words into fragments", () => {
+    expect(tokenize("naïve café résumé")).toEqual(["naive", "cafe", "resume"]);
   });
 
   it("returns an empty array for empty input", () => {
@@ -384,6 +392,29 @@ describe("extractTriggerPhrases", () => {
   it("ignores clause fragments that are too short to be meaningful", () => {
     expect(extractTriggerPhrases("Use when x, or y")).toEqual([]);
   });
+
+  it("requires a word boundary, so 'misuse when' is not a lead", () => {
+    expect(extractTriggerPhrases("Misuse when handling authentication flows")).toEqual([]);
+  });
+
+  it("truncates a clause at the end of its sentence", () => {
+    expect(extractTriggerPhrases("Use when debugging failures. Do not use otherwise.")).toEqual([
+      "debugging failures",
+    ]);
+  });
+
+  it("keeps clauses from separate leads from bleeding into each other", () => {
+    expect(extractTriggerPhrases("Use when refactoring modules, use when renaming symbols")).toEqual([
+      "refactoring modules",
+      "renaming symbols",
+    ]);
+  });
+
+  it("deduplicates a clause repeated across sentences", () => {
+    expect(extractTriggerPhrases("Use when creating a theme. Use when creating a theme.")).toEqual([
+      "creating a theme",
+    ]);
+  });
 });
 ```
 
@@ -395,44 +426,63 @@ Expected: FAIL — cannot find module `../src/text.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/text.ts
-
+// Grammatical filler only. Domain-common words (code, file, test) are deliberately NOT here:
+// the scorer weights terms by inverse document frequency, so words common across the whole
+// skill catalogue already contribute nearly nothing. Removing them here would instead destroy
+// the signal for skills that are genuinely about code or files.
 const STOPWORDS = new Set([
   "the", "this", "that", "these", "those", "and", "for", "with", "when", "use",
   "using", "used", "any", "all", "you", "your", "are", "was", "were", "has",
   "have", "had", "not", "but", "can", "will", "should", "would", "into", "from",
   "before", "after", "then", "than", "them", "they", "its", "our", "out", "get",
-  "let", "one", "two", "how", "why", "what", "which", "who", "whom", "code",
-  "file", "files", "please", "help", "make", "need", "want", "like", "just",
+  "let", "one", "two", "how", "why", "what", "which", "who", "whom",
+  "please", "help", "make", "need", "want", "like", "just",
   "some", "more", "most", "other", "also", "about", "over", "under", "very",
 ]);
 
 const MIN_TOKEN_LENGTH = 3;
-const MIN_PHRASE_LENGTH = 8;
 
-/** Deterministic tokeniser. Lowercase, alphanumeric runs, stopwords and short tokens removed. */
+/** Clauses shorter than this are placeholders like "x, or y" that would match almost any prompt. */
+const MIN_PHRASE_LENGTH = 5;
+
+/**
+ * Deterministic tokeniser. Folds diacritics so accented text yields whole words rather than
+ * fragments, then keeps alphanumeric runs that are neither too short nor pure filler.
+ */
 export function tokenize(text: string): string[] {
   return text
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
+    .split(/[^\p{L}\p{N}]+/u)
     .filter((t) => t.length >= MIN_TOKEN_LENGTH && !STOPWORDS.has(t));
 }
 
-const TRIGGER_LEAD = /(?:use|apply|activate|invoke)\s+(?:this\s+)?(?:skill\s+)?when\s+/gi;
+/** Word-bounded so "misuse when" and "reuse when" do not produce phantom leads. */
+const TRIGGER_LEAD = /\b(?:use|apply|activate|invoke)\s+(?:this\s+)?(?:skill\s+)?when\s+/gi;
+const CLAUSE_END = /[.!?](?:\s|$)|;|\n/;
+const LEADING_WHEN = /^when\s+/;
 
 /**
  * Extract trigger phrases from a skill description. Skill authors conventionally write
  * "Use when X, Y, or Z"; each comma- or "or"-separated clause becomes a phrase.
+ *
+ * Each lead's text is truncated at the next lead, so a description with several "use when"
+ * clauses yields clean phrases instead of ones containing the following lead's words.
  */
 export function extractTriggerPhrases(description: string): string[] {
   const phrases: string[] = [];
   const matches = [...description.matchAll(TRIGGER_LEAD)];
 
-  for (const match of matches) {
-    const start = (match.index ?? 0) + match[0].length;
-    const tail = description.slice(start).split(/(?:\.\s|\.$|;|\n)/)[0] ?? "";
-    for (const raw of tail.split(/,\s*(?:or\s+)?|\s+or\s+/i)) {
-      const phrase = raw.trim().replace(/[.:;]+$/, "").toLowerCase();
+  for (const [index, match] of matches.entries()) {
+    if (match.index === undefined) continue;
+    const start = match.index + match[0].length;
+    const nextLead = matches[index + 1]?.index ?? description.length;
+    const segment = description.slice(start, nextLead).toLowerCase();
+    const tail = segment.split(CLAUSE_END)[0] ?? segment;
+
+    for (const raw of tail.split(/,\s*(?:or\s+)?|\s+or\s+/)) {
+      const phrase = raw.trim().replace(LEADING_WHEN, "").replace(/[.:;!?]+$/, "").trim();
       if (phrase.length >= MIN_PHRASE_LENGTH) phrases.push(phrase);
     }
   }
@@ -444,7 +494,7 @@ export function extractTriggerPhrases(description: string): string[] {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/text.test.ts`
-Expected: PASS, 8 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit**
 
