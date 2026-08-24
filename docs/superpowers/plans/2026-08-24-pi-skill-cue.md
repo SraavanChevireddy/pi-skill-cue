@@ -1439,12 +1439,11 @@ git commit -m "feat: add pure normalised skill scorer with IDF weighting and reg
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/injector.test.ts
 import { describe, expect, it } from "vitest";
 import { buildDirective, MAX_DIRECTIVE_CHARS } from "../src/injector.js";
 import type { RankedMatch, SkillRecord } from "../src/types.js";
 
-function match(name: string, score: number, detail = "some trigger phrase"): RankedMatch {
+function match(name: string, detail = "some trigger phrase"): RankedMatch {
   const skill: SkillRecord = {
     name,
     path: `/fixtures/${name}/SKILL.md`,
@@ -1453,7 +1452,7 @@ function match(name: string, score: number, detail = "some trigger phrase"): Ran
     terms: [name],
     mtimeMs: 1,
   };
-  return { skill, score, reasons: [{ kind: "trigger", detail }] };
+  return { skill, score: 0.8, reasons: [{ kind: "trigger", detail }] };
 }
 
 describe("buildDirective", () => {
@@ -1462,31 +1461,51 @@ describe("buildDirective", () => {
   });
 
   it("names the skill and its absolute path", () => {
-    const text = buildDirective([match("alpha", 0.8)], new Set());
+    const text = buildDirective([match("alpha")], new Set());
     expect(text).toContain("`alpha`");
     expect(text).toContain("/fixtures/alpha/SKILL.md");
   });
 
   it("states the reason so a user can debug a bad match", () => {
-    expect(buildDirective([match("alpha", 0.8, "reviewing a pull request")], new Set()))
+    expect(buildDirective([match("alpha", "reviewing a pull request")], new Set()))
       .toContain("reviewing a pull request");
   });
 
   it("omits skills already read this session", () => {
-    const text = buildDirective([match("alpha", 0.9), match("beta", 0.8)], new Set(["alpha"]));
+    const text = buildDirective([match("alpha"), match("beta")], new Set(["alpha"]));
     expect(text).not.toContain("`alpha`");
     expect(text).toContain("`beta`");
   });
 
   it("returns undefined when every match was already read", () => {
-    expect(buildDirective([match("alpha", 0.9)], new Set(["alpha"]))).toBeUndefined();
+    expect(buildDirective([match("alpha")], new Set(["alpha"]))).toBeUndefined();
   });
 
-  it("stays within the character budget", () => {
-    const many = ["alpha", "beta", "gamma"].map((n) => match(n, 0.9, "x".repeat(400)));
-    const text = buildDirective(many, new Set()) ?? "";
+  it("drops the lowest-ranked matches when the budget is reached", () => {
+    // Each line renders name and path, so a long name makes one line exceed a third of the budget.
+    const wide = (name: string) => match(name.padEnd(160, "-"));
+    const text = buildDirective([wide("alpha"), wide("beta"), wide("gamma")], new Set()) ?? "";
+
+    expect(text.length).toBeLessThanOrEqual(MAX_DIRECTIVE_CHARS);
+    expect(text).toContain("alpha");
+    expect(text).not.toContain("gamma");
+  });
+
+  it("truncates an over-long reason rather than the match list", () => {
+    const text = buildDirective([match("alpha", "x".repeat(400))], new Set()) ?? "";
+    expect(text).toContain("...");
     expect(text.length).toBeLessThanOrEqual(MAX_DIRECTIVE_CHARS);
     expect(text).toContain("`alpha`");
+  });
+
+  it("preserves the ranking order it was given", () => {
+    const text = buildDirective([match("beta"), match("alpha")], new Set()) ?? "";
+    expect(text.indexOf("`beta`")).toBeLessThan(text.indexOf("`alpha`"));
+  });
+
+  it("falls back to a generic reason when a match carries none", () => {
+    const bare: RankedMatch = { ...match("alpha"), reasons: [] };
+    expect(buildDirective([bare], new Set())).toContain("lexical match");
   });
 });
 ```
@@ -1499,37 +1518,50 @@ Expected: FAIL — cannot find module `../src/injector.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/injector.ts
 import type { RankedMatch } from "./types.js";
 
 export const MAX_DIRECTIVE_CHARS = 600;
 
-const HEADER = "## Skill match for this request";
+/** Longest reason we render. Anything longer is usually a whole "use when" sentence. */
+const MAX_REASON_CHARS = 80;
+const ELLIPSIS = "...";
+
+const HEADER = "## Skill matches for this request";
 const FOOTER =
   "Read the matching SKILL.md before acting. If a match is irrelevant to what was asked, ignore it and continue.";
 
-function line(match: RankedMatch): string {
+function renderMatchLine(match: RankedMatch): string {
   const reason = match.reasons[0]?.detail ?? "lexical match";
-  const trimmed = reason.length > 80 ? `${reason.slice(0, 77)}...` : reason;
+  const trimmed =
+    reason.length > MAX_REASON_CHARS
+      ? `${reason.slice(0, MAX_REASON_CHARS - ELLIPSIS.length)}${ELLIPSIS}`
+      : reason;
   return `- \`${match.skill.name}\` (${match.skill.path}) — matched: ${trimmed}`;
 }
 
 /**
  * Render ranked matches into a directive appended to the turn's system prompt.
+ *
+ * `matches` must be ordered best-first and already filtered by `scoreSkills`; when the character
+ * budget is reached the lowest-ranked entries are dropped. `reasons[0]` is assumed to be the
+ * highest-weighted reason, which is what `scoreSkills` produces.
+ *
  * Skills already read this session are omitted: repeating them trains the model to ignore the block.
  */
-export function buildDirective(matches: RankedMatch[], alreadyRead: Set<string>): string | undefined {
-  const fresh = matches.filter((m) => !alreadyRead.has(m.skill.name));
+export function buildDirective(
+  matches: readonly RankedMatch[],
+  alreadyRead: ReadonlySet<string>,
+): string | undefined {
+  const fresh = matches.filter((match) => !alreadyRead.has(match.skill.name));
   if (fresh.length === 0) return undefined;
 
   const lines: string[] = [];
-  let length = HEADER.length + FOOTER.length + 2;
-
   for (const match of fresh) {
-    const rendered = line(match);
-    if (length + rendered.length + 1 > MAX_DIRECTIVE_CHARS) break;
-    lines.push(rendered);
-    length += rendered.length + 1;
+    // Measure the candidate output rather than predicting its length: the input is capped at
+    // config.maxSkills, so the repeated joins cost nothing and cannot drift out of step.
+    const candidate = [HEADER, ...lines, renderMatchLine(match), FOOTER].join("\n");
+    if (candidate.length > MAX_DIRECTIVE_CHARS) break;
+    lines.push(renderMatchLine(match));
   }
 
   if (lines.length === 0) return undefined;
@@ -1540,7 +1572,7 @@ export function buildDirective(matches: RankedMatch[], alreadyRead: Set<string>)
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/injector.test.ts`
-Expected: PASS, 6 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
 
