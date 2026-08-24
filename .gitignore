@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+*.jsonl
+.pi/
+.env
+.env.*
+.leakpatterns.local
+.DS_Store
