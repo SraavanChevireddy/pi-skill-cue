@@ -67,6 +67,20 @@ export function parseSkillFile(path: string): ParsedSkill | undefined {
   return { name, description };
 }
 
+/**
+ * Routing fields derived from a skill's name and description. Exported so tests and any other
+ * consumer derive them the same way `makeRecord` does, rather than duplicating the rule.
+ */
+export function deriveRoutingFields(
+  name: string,
+  description: string,
+): { triggerPhrases: string[]; terms: string[] } {
+  return {
+    triggerPhrases: extractTriggerPhrases(description),
+    terms: [...new Set(tokenize(`${name} ${description}`))],
+  };
+}
+
 interface CacheEntry {
   mtimeMs: number;
   size: number;
@@ -95,8 +109,7 @@ function makeRecord(input: SkillInput, mtimeMs: number): SkillRecord | undefined
     name,
     path: input.path,
     description,
-    triggerPhrases: extractTriggerPhrases(description),
-    terms: [...new Set(tokenize(`${name} ${description}`))],
+    ...deriveRoutingFields(name, description),
     mtimeMs,
   };
 

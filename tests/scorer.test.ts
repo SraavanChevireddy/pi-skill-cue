@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { deriveRoutingFields } from "../src/catalog.js";
 import { scoreSkills } from "../src/scorer.js";
-import { extractTriggerPhrases, tokenize } from "../src/text.js";
 import { DEFAULT_CONFIG, type CueConfig, type SkillRecord } from "../src/types.js";
 
 function record(name: string, description: string): SkillRecord {
@@ -14,19 +14,16 @@ function record(name: string, description: string): SkillRecord {
   };
 }
 
-/** Mirrors what buildCatalog derives, kept local so the scorer test needs no filesystem. */
+/** Mirrors what buildCatalog derives, via the same function it uses. */
 function withDerived(r: SkillRecord): SkillRecord {
-  return {
-    ...r,
-    triggerPhrases: extractTriggerPhrases(r.description),
-    terms: [...new Set(tokenize(`${r.name} ${r.description}`))],
-  };
+  return { ...r, ...deriveRoutingFields(r.name, r.description) };
 }
 
 const catalog: SkillRecord[] = [
   record("systematic-debugging", "Use when encountering a failing test or unexpected behaviour, before proposing fixes"),
   record("banner-design", "Use when designing banners for social media, ads, or website heroes"),
   record("ticket-workflow", "Use when the user references a tracked work item by key"),
+  record("config-audit", "Use when reviewing json configuration files"),
 ].map(withDerived);
 
 const signals = (prompt: string) => ({ prompt, cwdExtensions: [] as string[] });
@@ -39,7 +36,9 @@ describe("scoreSkills", () => {
   });
 
   it("normalises every score into 0..1", () => {
-    for (const match of scoreSkills(catalog, signals("designing banners for ads"), DEFAULT_CONFIG)) {
+    const matches = scoreSkills(catalog, signals("designing banners for ads"), DEFAULT_CONFIG);
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
       expect(match.score).toBeGreaterThanOrEqual(0);
       expect(match.score).toBeLessThanOrEqual(1);
     }
@@ -58,8 +57,10 @@ describe("scoreSkills", () => {
   });
 
   it("honours maxSkills", () => {
-    const config: CueConfig = { ...DEFAULT_CONFIG, maxSkills: 1, threshold: 0.01 };
-    expect(scoreSkills(catalog, signals("failing test while designing banners"), config)).toHaveLength(1);
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const prompt = signals("failing test while designing banners");
+    expect(scoreSkills(catalog, prompt, permissive).length).toBeGreaterThan(1);
+    expect(scoreSkills(catalog, prompt, { ...permissive, maxSkills: 1 })).toHaveLength(1);
   });
 
   it("never returns a muted skill", () => {
@@ -77,13 +78,67 @@ describe("scoreSkills", () => {
     expect(matches[0]?.skill.name).toBe("alpha");
   });
 
-  it("is deterministic across repeated calls", () => {
-    const a = scoreSkills(catalog, signals("a failing test"), DEFAULT_CONFIG);
-    const b = scoreSkills(catalog, signals("a failing test"), DEFAULT_CONFIG);
-    expect(a.map((m) => [m.skill.name, m.score])).toEqual(b.map((m) => [m.skill.name, m.score]));
+  it("breaks a score tie alphabetically regardless of input order", () => {
+    const pair = [
+      record("zeta-skill", "Use when handling identical twin descriptions"),
+      record("alpha-skill", "Use when handling identical twin descriptions"),
+    ].map(withDerived);
+    const matches = scoreSkills(pair, signals("handling identical twin descriptions"), {
+      ...DEFAULT_CONFIG,
+      threshold: 0.01,
+    });
+    expect(matches.map((m) => m.skill.name)).toEqual(["alpha-skill", "zeta-skill"]);
   });
 
   it("returns an empty array for an empty catalogue", () => {
     expect(scoreSkills([], signals("anything at all"), DEFAULT_CONFIG)).toEqual([]);
+  });
+
+  it("adds a context reason when a working-directory extension matches a skill term", () => {
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const withContext = scoreSkills(catalog, { prompt: "check the configuration", cwdExtensions: ["json"] }, permissive);
+    const withoutContext = scoreSkills(catalog, { prompt: "check the configuration", cwdExtensions: [] }, permissive);
+    const hit = withContext.find((m) => m.skill.name === "config-audit");
+    const base = withoutContext.find((m) => m.skill.name === "config-audit");
+    expect(hit?.reasons.some((r) => r.kind === "context")).toBe(true);
+    expect(hit?.score ?? 0).toBeGreaterThan(base?.score ?? 0);
+  });
+
+  it("does not treat a short extension as a substring of a skill's words", () => {
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const matches = scoreSkills(catalog, { prompt: "make me a banner", cwdExtensions: ["rs"] }, permissive);
+    const banner = matches.find((m) => m.skill.name === "banner-design");
+    expect(banner?.reasons.some((r) => r.kind === "context") ?? false).toBe(false);
+  });
+
+  it("clamps a score that would otherwise exceed one", () => {
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const matches = scoreSkills(
+      catalog,
+      { prompt: "reviewing json configuration files", cwdExtensions: ["json"] },
+      permissive,
+    );
+    expect(matches.find((m) => m.skill.name === "config-audit")?.score).toBe(1);
+  });
+
+  it("does not let a partial phrase match fire on a word that merely contains a trigger word", () => {
+    const only = [record("failing-test-triage", "Use when a test is failing")].map(withDerived);
+    const matches = scoreSkills(only, signals("the latest contest results"), { ...DEFAULT_CONFIG, threshold: 0.01 });
+    expect(matches.some((m) => m.reasons.some((r) => r.kind === "trigger"))).toBe(false);
+  });
+
+  it("ignores an unparseable configured regex instead of throwing", () => {
+    const config: CueConfig = { ...DEFAULT_CONFIG, triggers: { "ticket-workflow": ["([unclosed"] } };
+    expect(() => scoreSkills(catalog, signals("take a look at ABC-1234"), config)).not.toThrow();
+    const names = scoreSkills(catalog, signals("unrelated chatter entirely"), config).map((m) => m.skill.name);
+    expect(names).not.toContain("ticket-workflow");
+  });
+
+  it("muting a skill does not change the scores of the skills that remain", () => {
+    const prompt = signals("I have a failing test");
+    const before = scoreSkills(catalog, prompt, { ...DEFAULT_CONFIG, threshold: 0.01 });
+    const after = scoreSkills(catalog, prompt, { ...DEFAULT_CONFIG, threshold: 0.01, mute: ["banner-design"] });
+    const scoreOf = (list: typeof before, name: string) => list.find((m) => m.skill.name === name)?.score;
+    expect(scoreOf(after, "systematic-debugging")).toBe(scoreOf(before, "systematic-debugging"));
   });
 });
