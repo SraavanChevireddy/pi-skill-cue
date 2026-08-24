@@ -31,23 +31,50 @@ export function parseSkillFile(path: string): ParsedSkill | undefined {
     return undefined;
   }
 
-  const block = FRONTMATTER.exec(raw)?.[1];
+  const block = FRONTMATTER.exec(raw.replace(/^\uFEFF/, ""))?.[1];
   if (!block) return undefined;
 
+  const lines = block.split(/\r?\n/);
   let name = "";
   let description = "";
-  for (const line of block.split(/\r?\n/)) {
-    const match = /^(name|description):\s*(.*)$/.exec(line);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^(name|description):\s*(.*)$/.exec(lines[index] ?? "");
     if (!match) continue;
-    if (match[1] === "name") name = unquote(match[2] ?? "");
-    else description = unquote(match[2] ?? "");
+
+    let value = unquote(match[2] ?? "");
+    // A block scalar indicator (or nothing) means the value is the indented lines that follow.
+    if (value === "" || value === ">" || value === ">-" || value === "|" || value === "|-") {
+      const continuation: string[] = [];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1] ?? "";
+        if (next.trim() === "") {
+          index += 1;
+          continue;
+        }
+        if (!/^\s/.test(next)) break;
+        continuation.push(next.trim());
+        index += 1;
+      }
+      value = continuation.join(" ").trim();
+    }
+
+    if (match[1] === "name") name = value;
+    else description = value;
   }
 
   if (!name) return undefined;
   return { name, description };
 }
 
-const cache = new Map<string, { mtimeMs: number; record: SkillRecord }>();
+interface CacheEntry {
+  mtimeMs: number;
+  size: number;
+  description: string | undefined;
+  record: SkillRecord;
+}
+
+const cache = new Map<string, CacheEntry>();
 
 /** Exposed for tests that need a cold cache. */
 export function clearCatalogCache(): void {
@@ -58,9 +85,13 @@ function makeRecord(input: SkillInput, mtimeMs: number): SkillRecord | undefined
   const parsed = parseSkillFile(input.path);
   const description = input.description ?? parsed?.description ?? "";
   const name = input.name || parsed?.name || "";
-  if (!name || (!description && !parsed)) return undefined;
+  if (!name) return undefined;
+  // A skill with neither a parseable file nor a description from pi has nothing to route on.
+  if (!parsed && !input.description) return undefined;
 
-  return {
+  // A parseable skill with an empty description is kept deliberately: it cannot match, and the
+  // doctor reports exactly that. Dropping it here would hide the problem from the user.
+  const record: SkillRecord = {
     name,
     path: input.path,
     description,
@@ -68,31 +99,56 @@ function makeRecord(input: SkillInput, mtimeMs: number): SkillRecord | undefined
     terms: [...new Set(tokenize(`${name} ${description}`))],
     mtimeMs,
   };
+
+  Object.freeze(record.triggerPhrases);
+  Object.freeze(record.terms);
+  return Object.freeze(record);
 }
 
-/** Normalise pi's loaded skills into routing records. mtime-cached; unparseable skills are dropped. */
+/**
+ * Normalise pi's loaded skills into routing records. Cached by path, invalidated when the file's
+ * mtime or size changes or pi reports a different description. Unparseable skills are dropped,
+ * and entries for skills no longer present are evicted so a long session does not accumulate them.
+ */
 export function buildCatalog(inputs: SkillInput[]): SkillRecord[] {
   const records: SkillRecord[] = [];
+  const seen = new Set<string>();
 
   for (const input of inputs) {
     let mtimeMs: number;
+    let size: number;
     try {
-      mtimeMs = statSync(input.path).mtimeMs;
+      const stats = statSync(input.path);
+      mtimeMs = stats.mtimeMs;
+      size = stats.size;
     } catch {
       continue;
     }
 
-    const key = `${input.path}::${input.description ?? ""}`;
-    const cached = cache.get(key);
-    if (cached && cached.mtimeMs === mtimeMs) {
+    seen.add(input.path);
+    const cached = cache.get(input.path);
+    if (
+      cached &&
+      cached.mtimeMs === mtimeMs &&
+      cached.size === size &&
+      cached.description === input.description
+    ) {
       records.push(cached.record);
       continue;
     }
 
     const record = makeRecord(input, mtimeMs);
-    if (!record) continue;
-    cache.set(key, { mtimeMs, record });
+    if (!record) {
+      cache.delete(input.path);
+      continue;
+    }
+
+    cache.set(input.path, { mtimeMs, size, description: input.description, record });
     records.push(record);
+  }
+
+  for (const key of [...cache.keys()]) {
+    if (!seen.has(key)) cache.delete(key);
   }
 
   return records;
