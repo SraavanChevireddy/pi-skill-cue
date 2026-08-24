@@ -970,6 +970,20 @@ export function parseSkillFile(path: string): ParsedSkill | undefined {
   return { name, description };
 }
 
+/**
+ * Routing fields derived from a skill's name and description. Exported so tests and any other
+ * consumer derive them the same way `makeRecord` does, rather than duplicating the rule.
+ */
+export function deriveRoutingFields(
+  name: string,
+  description: string,
+): { triggerPhrases: string[]; terms: string[] } {
+  return {
+    triggerPhrases: extractTriggerPhrases(description),
+    terms: [...new Set(tokenize(`${name} ${description}`))],
+  };
+}
+
 interface CacheEntry {
   mtimeMs: number;
   size: number;
@@ -998,8 +1012,7 @@ function makeRecord(input: SkillInput, mtimeMs: number): SkillRecord | undefined
     name,
     path: input.path,
     description,
-    triggerPhrases: extractTriggerPhrases(description),
-    terms: [...new Set(tokenize(`${name} ${description}`))],
+    ...deriveRoutingFields(name, description),
     mtimeMs,
   };
 
@@ -1083,10 +1096,9 @@ The engine. Pure, deterministic, normalised to 0..1 so `threshold` means the sam
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/scorer.test.ts
 import { describe, expect, it } from "vitest";
+import { deriveRoutingFields } from "../src/catalog.js";
 import { scoreSkills } from "../src/scorer.js";
-import { extractTriggerPhrases, tokenize } from "../src/text.js";
 import { DEFAULT_CONFIG, type CueConfig, type SkillRecord } from "../src/types.js";
 
 function record(name: string, description: string): SkillRecord {
@@ -1100,19 +1112,16 @@ function record(name: string, description: string): SkillRecord {
   };
 }
 
-/** Mirrors what buildCatalog derives, kept local so the scorer test needs no filesystem. */
+/** Mirrors what buildCatalog derives, via the same function it uses. */
 function withDerived(r: SkillRecord): SkillRecord {
-  return {
-    ...r,
-    triggerPhrases: extractTriggerPhrases(r.description),
-    terms: [...new Set(tokenize(`${r.name} ${r.description}`))],
-  };
+  return { ...r, ...deriveRoutingFields(r.name, r.description) };
 }
 
 const catalog: SkillRecord[] = [
   record("systematic-debugging", "Use when encountering a failing test or unexpected behaviour, before proposing fixes"),
   record("banner-design", "Use when designing banners for social media, ads, or website heroes"),
   record("ticket-workflow", "Use when the user references a tracked work item by key"),
+  record("config-audit", "Use when reviewing json configuration files"),
 ].map(withDerived);
 
 const signals = (prompt: string) => ({ prompt, cwdExtensions: [] as string[] });
@@ -1125,7 +1134,9 @@ describe("scoreSkills", () => {
   });
 
   it("normalises every score into 0..1", () => {
-    for (const match of scoreSkills(catalog, signals("designing banners for ads"), DEFAULT_CONFIG)) {
+    const matches = scoreSkills(catalog, signals("designing banners for ads"), DEFAULT_CONFIG);
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
       expect(match.score).toBeGreaterThanOrEqual(0);
       expect(match.score).toBeLessThanOrEqual(1);
     }
@@ -1144,8 +1155,10 @@ describe("scoreSkills", () => {
   });
 
   it("honours maxSkills", () => {
-    const config: CueConfig = { ...DEFAULT_CONFIG, maxSkills: 1, threshold: 0.01 };
-    expect(scoreSkills(catalog, signals("failing test while designing banners"), config)).toHaveLength(1);
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const prompt = signals("failing test while designing banners");
+    expect(scoreSkills(catalog, prompt, permissive).length).toBeGreaterThan(1);
+    expect(scoreSkills(catalog, prompt, { ...permissive, maxSkills: 1 })).toHaveLength(1);
   });
 
   it("never returns a muted skill", () => {
@@ -1163,14 +1176,68 @@ describe("scoreSkills", () => {
     expect(matches[0]?.skill.name).toBe("alpha");
   });
 
-  it("is deterministic across repeated calls", () => {
-    const a = scoreSkills(catalog, signals("a failing test"), DEFAULT_CONFIG);
-    const b = scoreSkills(catalog, signals("a failing test"), DEFAULT_CONFIG);
-    expect(a.map((m) => [m.skill.name, m.score])).toEqual(b.map((m) => [m.skill.name, m.score]));
+  it("breaks a score tie alphabetically regardless of input order", () => {
+    const pair = [
+      record("zeta-skill", "Use when handling identical twin descriptions"),
+      record("alpha-skill", "Use when handling identical twin descriptions"),
+    ].map(withDerived);
+    const matches = scoreSkills(pair, signals("handling identical twin descriptions"), {
+      ...DEFAULT_CONFIG,
+      threshold: 0.01,
+    });
+    expect(matches.map((m) => m.skill.name)).toEqual(["alpha-skill", "zeta-skill"]);
   });
 
   it("returns an empty array for an empty catalogue", () => {
     expect(scoreSkills([], signals("anything at all"), DEFAULT_CONFIG)).toEqual([]);
+  });
+
+  it("adds a context reason when a working-directory extension matches a skill term", () => {
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const withContext = scoreSkills(catalog, { prompt: "check the configuration", cwdExtensions: ["json"] }, permissive);
+    const withoutContext = scoreSkills(catalog, { prompt: "check the configuration", cwdExtensions: [] }, permissive);
+    const hit = withContext.find((m) => m.skill.name === "config-audit");
+    const base = withoutContext.find((m) => m.skill.name === "config-audit");
+    expect(hit?.reasons.some((r) => r.kind === "context")).toBe(true);
+    expect(hit?.score ?? 0).toBeGreaterThan(base?.score ?? 0);
+  });
+
+  it("does not treat a short extension as a substring of a skill's words", () => {
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const matches = scoreSkills(catalog, { prompt: "make me a banner", cwdExtensions: ["rs"] }, permissive);
+    const banner = matches.find((m) => m.skill.name === "banner-design");
+    expect(banner?.reasons.some((r) => r.kind === "context") ?? false).toBe(false);
+  });
+
+  it("clamps a score that would otherwise exceed one", () => {
+    const permissive: CueConfig = { ...DEFAULT_CONFIG, threshold: 0.01 };
+    const matches = scoreSkills(
+      catalog,
+      { prompt: "reviewing json configuration files", cwdExtensions: ["json"] },
+      permissive,
+    );
+    expect(matches.find((m) => m.skill.name === "config-audit")?.score).toBe(1);
+  });
+
+  it("does not let a partial phrase match fire on a word that merely contains a trigger word", () => {
+    const only = [record("failing-test-triage", "Use when a test is failing")].map(withDerived);
+    const matches = scoreSkills(only, signals("the latest contest results"), { ...DEFAULT_CONFIG, threshold: 0.01 });
+    expect(matches.some((m) => m.reasons.some((r) => r.kind === "trigger"))).toBe(false);
+  });
+
+  it("ignores an unparseable configured regex instead of throwing", () => {
+    const config: CueConfig = { ...DEFAULT_CONFIG, triggers: { "ticket-workflow": ["([unclosed"] } };
+    expect(() => scoreSkills(catalog, signals("take a look at ABC-1234"), config)).not.toThrow();
+    const names = scoreSkills(catalog, signals("unrelated chatter entirely"), config).map((m) => m.skill.name);
+    expect(names).not.toContain("ticket-workflow");
+  });
+
+  it("muting a skill does not change the scores of the skills that remain", () => {
+    const prompt = signals("I have a failing test");
+    const before = scoreSkills(catalog, prompt, { ...DEFAULT_CONFIG, threshold: 0.01 });
+    const after = scoreSkills(catalog, prompt, { ...DEFAULT_CONFIG, threshold: 0.01, mute: ["banner-design"] });
+    const scoreOf = (list: typeof before, name: string) => list.find((m) => m.skill.name === name)?.score;
+    expect(scoreOf(after, "systematic-debugging")).toBe(scoreOf(before, "systematic-debugging"));
   });
 });
 ```
@@ -1183,69 +1250,122 @@ Expected: FAIL — cannot find module `../src/scorer.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/scorer.ts
 import { tokenize } from "./text.js";
 import type { CueConfig, MatchReason, RankedMatch, ScoreSignals, SkillRecord } from "./types.js";
 
+/** Weight of a matched "use when" phrase from the skill's own description. */
 const WEIGHT_TRIGGER = 0.55;
+/** Weight of IDF-weighted term overlap between the prompt and the skill. */
 const WEIGHT_TERMS = 0.45;
+/** Bonus when a working-directory signal agrees. Deliberately small: it is weak evidence. */
 const WEIGHT_CONTEXT = 0.1;
-const REGEX_SCORE = 0.96;
+/** A user-configured regex is a declaration of certainty, so it outranks anything inferred. */
+const REGEX_SCORE = 1;
+/** A phrase counts as matched when this fraction of its significant words appear in the prompt. */
+const PARTIAL_PHRASE_RATIO = 0.6;
+/**
+ * Weight given to a prompt term that appears nowhere in the catalogue. Such a term can never be
+ * matched, so it only dilutes the denominator; this keeps that dilution bounded and explicit.
+ */
+const UNKNOWN_TERM_IDF = Math.log(2);
 
-/** Inverse document frequency across the catalogue, so catalogue-wide terms contribute ~nothing. */
-function buildIdf(records: SkillRecord[]): Map<string, number> {
+/**
+ * Inverse document frequency across the whole catalogue, so terms common to every skill
+ * contribute almost nothing. Computed over all records, including muted ones, so muting a skill
+ * cannot shift the scores of the skills that remain.
+ */
+function buildIdf(records: readonly SkillRecord[]): Map<string, number> {
   const docFreq = new Map<string, number>();
   for (const record of records) {
-    for (const term of new Set(record.terms)) {
-      docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
-    }
+    // SkillRecord.terms is already deduplicated by deriveRoutingFields.
+    for (const term of record.terms) docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
   }
+
   const idf = new Map<string, number>();
-  const total = Math.max(records.length, 1);
-  for (const [term, df] of docFreq) {
-    idf.set(term, Math.log(1 + total / (1 + df)));
-  }
+  for (const [term, df] of docFreq) idf.set(term, Math.log(1 + records.length / (1 + df)));
   return idf;
 }
 
-function termRatio(promptTerms: string[], record: SkillRecord, idf: Map<string, number>): number {
-  if (promptTerms.length === 0) return 0;
+/** Compile configured patterns once per call rather than once per skill per prompt. */
+function compileTriggers(config: CueConfig): Map<string, RegExp[]> {
+  const compiled = new Map<string, RegExp[]>();
+  for (const [name, sources] of Object.entries(config.triggers)) {
+    const regexes: RegExp[] = [];
+    for (const source of sources) {
+      try {
+        regexes.push(new RegExp(source, "i"));
+      } catch {
+        // A malformed pattern can never match. config.ts drops these, but scoreSkills may be
+        // called with a hand-built config, so it must not throw.
+      }
+    }
+    if (regexes.length > 0) compiled.set(name, regexes);
+  }
+  return compiled;
+}
+
+function termRatio(
+  promptTerms: ReadonlySet<string>,
+  record: SkillRecord,
+  idf: Map<string, number>,
+): number {
+  if (promptTerms.size === 0) return 0;
+
   const skillTerms = new Set(record.terms);
   let matched = 0;
   let possible = 0;
-  for (const term of new Set(promptTerms)) {
-    const weight = idf.get(term) ?? Math.log(2);
+  for (const term of promptTerms) {
+    const weight = idf.get(term) ?? UNKNOWN_TERM_IDF;
     possible += weight;
     if (skillTerms.has(term)) matched += weight;
   }
+
   return possible === 0 ? 0 : matched / possible;
 }
 
-function triggerHit(prompt: string, record: SkillRecord): string | undefined {
+/**
+ * A trigger phrase matches either verbatim in the prompt, or when enough of its significant
+ * words appear as prompt TOKENS. Token comparison matters: substring comparison would let
+ * "test" match "latest".
+ */
+function matchTriggerPhrase(
+  prompt: string,
+  promptTerms: ReadonlySet<string>,
+  record: SkillRecord,
+): string | undefined {
   const haystack = prompt.toLowerCase();
   for (const phrase of record.triggerPhrases) {
     if (haystack.includes(phrase)) return phrase;
-    const words = phrase.split(/\s+/).filter((w) => w.length > 3);
-    if (words.length >= 2 && words.every((w) => haystack.includes(w))) return phrase;
+
+    const words = tokenize(phrase);
+    if (words.length < 2) continue;
+    const present = words.filter((word) => promptTerms.has(word)).length;
+    if (present / words.length >= PARTIAL_PHRASE_RATIO) return phrase;
   }
   return undefined;
 }
 
-function regexHit(prompt: string, name: string, config: CueConfig): string | undefined {
-  for (const source of config.triggers[name] ?? []) {
-    try {
-      if (new RegExp(source, "i").test(prompt)) return source;
-    } catch {
-      continue;
-    }
+function matchConfiguredRegex(
+  prompt: string,
+  name: string,
+  compiled: Map<string, RegExp[]>,
+): string | undefined {
+  for (const regex of compiled.get(name) ?? []) {
+    if (regex.test(prompt)) return regex.source;
   }
   return undefined;
 }
 
-function contextHit(record: SkillRecord, signals: ScoreSignals): string | undefined {
-  const text = `${record.name} ${record.description}`.toLowerCase();
-  for (const ext of signals.cwdExtensions) {
-    if (ext.length >= 2 && text.includes(ext.toLowerCase())) return ext;
+/**
+ * A working-directory extension matches only as a whole skill term. Substring comparison here
+ * scored "banner-design" for a Rust project, because "banners" contains "rs". Extensions shorter
+ * than a routing term (tokenize drops anything under three characters) therefore never match,
+ * which is deliberate: "ts", "go" and "rs" are too ambiguous to be evidence.
+ */
+function matchCwdExtension(record: SkillRecord, signals: ScoreSignals): string | undefined {
+  const terms = new Set(record.terms);
+  for (const extension of signals.cwdExtensions) {
+    if (terms.has(extension.toLowerCase())) return extension;
   }
   return undefined;
 }
@@ -1259,31 +1379,32 @@ export function scoreSkills(
   signals: ScoreSignals,
   config: CueConfig,
 ): RankedMatch[] {
-  const muted = new Set(config.mute);
-  const candidates = records.filter((r) => !muted.has(r.name));
-  if (candidates.length === 0) return [];
+  if (records.length === 0) return [];
 
-  const idf = buildIdf(candidates);
-  const promptTerms = tokenize(signals.prompt);
+  const idf = buildIdf(records);
+  const compiled = compileTriggers(config);
+  const promptTerms = new Set(tokenize(signals.prompt));
+  const muted = new Set(config.mute);
   const matches: RankedMatch[] = [];
 
-  for (const skill of candidates) {
+  for (const skill of records) {
+    if (muted.has(skill.name)) continue;
+
     const reasons: MatchReason[] = [];
 
-    const regex = regexHit(signals.prompt, skill.name, config);
+    const regex = matchConfiguredRegex(signals.prompt, skill.name, compiled);
     if (regex) reasons.push({ kind: "regex", detail: regex });
 
-    const trigger = triggerHit(signals.prompt, skill);
+    const trigger = matchTriggerPhrase(signals.prompt, promptTerms, skill);
     if (trigger) reasons.push({ kind: "trigger", detail: trigger });
 
     const ratio = termRatio(promptTerms, skill, idf);
     if (ratio > 0) reasons.push({ kind: "terms", detail: `term overlap ${ratio.toFixed(2)}` });
 
-    const context = contextHit(skill, signals);
+    const context = matchCwdExtension(skill, signals);
     if (context) reasons.push({ kind: "context", detail: `${context} files in cwd` });
 
-    let score =
-      (trigger ? WEIGHT_TRIGGER : 0) + WEIGHT_TERMS * ratio + (context ? WEIGHT_CONTEXT : 0);
+    let score = (trigger ? WEIGHT_TRIGGER : 0) + WEIGHT_TERMS * ratio + (context ? WEIGHT_CONTEXT : 0);
     if (regex) score = Math.max(score, REGEX_SCORE);
     score = Math.min(1, score);
 
@@ -1298,7 +1419,7 @@ export function scoreSkills(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/scorer.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Commit**
 
