@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -32,21 +32,38 @@ describe("Ledger", () => {
   it("skips malformed lines instead of throwing", () => {
     const ledger = new Ledger(dir());
     ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
-    ledger.appendRaw("{ not json\n");
+    appendFileSync(ledger.file, "{ not json\n", "utf8");
+    expect(ledger.read()).toHaveLength(1);
+  });
+
+  it("drops a line missing the field its aggregator reads", () => {
+    const ledger = new Ledger(dir());
+    ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
+    appendFileSync(ledger.file, `${JSON.stringify({ type: "read", ts: 2 })}\n`, "utf8");
+    expect(ledger.read()).toHaveLength(1);
+    expect([...ledger.stats().keys()]).toEqual(["alpha"]);
+  });
+
+  it("drops a line whose type is not a known event", () => {
+    const ledger = new Ledger(dir());
+    ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
+    appendFileSync(ledger.file, `${JSON.stringify({ type: "nonsense", skill: "alpha" })}\n`, "utf8");
     expect(ledger.read()).toHaveLength(1);
   });
 
   it("purges the log file", () => {
-    const root = dir();
-    const ledger = new Ledger(root);
+    const ledger = new Ledger(dir());
     ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" });
     expect(existsSync(ledger.file)).toBe(true);
     ledger.purge();
+    expect(existsSync(ledger.file)).toBe(false);
     expect(ledger.read()).toEqual([]);
   });
 
   it("swallows write failures so routing is never interrupted", () => {
-    const ledger = new Ledger("/proc/definitely/not/writable");
+    const blocker = join(dir(), "not-a-directory");
+    writeFileSync(blocker, "");
+    const ledger = new Ledger(blocker);
     expect(() => ledger.append({ type: "read", ts: 1, session: "s1", skill: "alpha" })).not.toThrow();
     expect(ledger.read()).toEqual([]);
   });
