@@ -59,7 +59,7 @@ describe("Gatekeeper", () => {
     expect(keeper.check("write")).toBeUndefined();
   });
 
-  it("counts consecutive blocks per tool, not globally", () => {
+  it("counts blocks per tool, not globally", () => {
     const keeper = new Gatekeeper(gated(), [tdd]);
     keeper.check("write");
     keeper.check("write");
@@ -79,6 +79,51 @@ describe("Gatekeeper", () => {
   it("reports which skills have been read for injector dedupe", () => {
     const keeper = new Gatekeeper(gated(), [tdd]);
     keeper.noteRead("/fixtures/test-driven-development/SKILL.md");
-    expect(keeper.readSkills()).toEqual(new Set(["test-driven-development"]));
+    expect(keeper.satisfiedSkills()).toEqual(new Set(["test-driven-development"]));
+  });
+
+  it("stops blocking permanently once it releases", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    expect(keeper.check("write")?.block).toBe(true);
+    expect(keeper.check("write")?.block).toBe(true);
+    expect(keeper.check("write")).toBeUndefined();
+    expect(keeper.check("write")).toBeUndefined();
+    expect(keeper.check("write")).toBeUndefined();
+  });
+
+  it("accepts a differently written path for the same file", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    keeper.noteRead("/fixtures/test-driven-development/../test-driven-development/SKILL.md");
+    expect(keeper.check("write")).toBeUndefined();
+  });
+
+  it("does not satisfy a gate by reading another file inside the skill's directory", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    keeper.noteRead("/fixtures/test-driven-development/references/details.md");
+    expect(keeper.check("write")?.block).toBe(true);
+  });
+
+  it("never blocks while the extension is disabled", () => {
+    const keeper = new Gatekeeper({ ...gated(), enabled: false }, [tdd]);
+    expect(keeper.check("write")).toBeUndefined();
+  });
+
+  it("reports a skill satisfied by a /skill: invocation as satisfied", () => {
+    const keeper = new Gatekeeper(gated(), [tdd]);
+    keeper.markSatisfied("test-driven-development");
+    expect(keeper.satisfiedSkills()).toEqual(new Set(["test-driven-development"]));
+  });
+
+  it("lets the first gate in config order win when two guard the same tool", () => {
+    const other: SkillRecord = { ...tdd, name: "brainstorming", path: "/fixtures/brainstorming/SKILL.md" };
+    const config: CueConfig = {
+      ...DEFAULT_CONFIG,
+      gates: {
+        "test-driven-development": { tools: ["write"] },
+        brainstorming: { tools: ["write"] },
+      },
+    };
+    const keeper = new Gatekeeper(config, [tdd, other]);
+    expect(keeper.check("write")?.skill).toBe("test-driven-development");
   });
 });
