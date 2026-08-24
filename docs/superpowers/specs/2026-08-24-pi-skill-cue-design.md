@@ -237,7 +237,10 @@ absolute path. None of it ships.
    `ABC-123`-style ticket keys. No internal project keys, product names, hostnames,
    or repository names.
 4. **Allowlist packaging.** `package.json` `files` explicitly lists what ships
-   (`dist/`, `README.md`, `LICENSE`). Not `.npmignore`, which fails by omission.
+   (`extensions/`, `src/`, `README.md`, `LICENSE`). Pi loads `.ts` extensions natively,
+   so TypeScript source ships as-is with no build step. Tests, fixtures, and the
+   benchmark corpus are excluded by omission from the allowlist. Not `.npmignore`,
+   which fails by omission in the dangerous direction.
 5. **Ledger never tracked.** Runtime data lives under `~/.pi/agent/skill-cue/`, outside
    any repository. `.gitignore` covers `*.jsonl`, `.pi/`, and local scratch paths.
 
