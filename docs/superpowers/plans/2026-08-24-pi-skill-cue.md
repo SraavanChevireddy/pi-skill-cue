@@ -43,12 +43,12 @@
 - Create: `tsconfig.json`
 - Create: `vitest.config.ts`
 - Create: `LICENSE`
-- Test: `tests/scaffold.test.ts`
+- Test: `tests/package-manifest.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/scaffold.test.ts
+// tests/package-manifest.test.ts
 import { describe, expect, it } from "vitest";
 import pkg from "../package.json" with { type: "json" };
 
@@ -74,7 +74,7 @@ describe("package manifest", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/scaffold.test.ts`
+Run: `npx vitest run tests/package-manifest.test.ts`
 Expected: FAIL — cannot resolve `../package.json` / vitest not installed.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -92,11 +92,14 @@ Expected: FAIL — cannot resolve `../package.json` / vitest not installed.
   "pi": {
     "extensions": ["./extensions"]
   },
+  "private": true,
+  "engines": { "node": ">=20.19.0" },
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "bench": "tsx bench/run.ts",
     "check:leaks": "node scripts/check-leaks.mjs",
-    "prepublishOnly": "npm run test && npm run bench && npm run check:leaks --strict"
+    "prepublishOnly": "npm run typecheck && npm run test && npm run bench && npm run check:leaks -- --strict"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -145,13 +148,13 @@ Create `LICENSE` as the standard MIT text, copyright holder `pi-skill-cue contri
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm install && npx vitest run tests/scaffold.test.ts`
+Run: `npm install && npx vitest run tests/package-manifest.test.ts`
 Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add package.json tsconfig.json vitest.config.ts LICENSE tests/scaffold.test.ts package-lock.json
+git add package.json tsconfig.json vitest.config.ts LICENSE tests/package-manifest.test.ts package-lock.json
 git commit -m "chore: scaffold package with allowlist packaging and zero runtime deps"
 ```
 
@@ -2775,7 +2778,7 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
-      - run: npx tsc --noEmit
+      - run: npm run typecheck
       - run: npm test
       - run: npm run bench
       - run: npm run check:leaks
@@ -2890,13 +2893,27 @@ node scripts/check-leaks.mjs --dir /tmp/cue-verify/package --strict
 
 Expected: `check-leaks: clean (… local set loaded)`. Any finding blocks the publish.
 
-- [ ] **Step 4: Publish**
+- [ ] **Step 4: Remove the publish block and add source links**
+
+Task 1 set `"private": true` so an incomplete scaffold could not be published by accident. Remove
+it now, and add the three fields a public package needs for its npm and gallery listing:
+
+```json
+"repository": { "type": "git", "url": "git+https://github.com/<owner>/pi-skill-cue.git" },
+"bugs": { "url": "https://github.com/<owner>/pi-skill-cue/issues" },
+"homepage": "https://github.com/<owner>/pi-skill-cue#readme"
+```
+
+Replace `<owner>` with the actual GitHub owner. Re-run `npm run typecheck && npm test` after the
+edit, then commit.
+
+- [ ] **Step 5: Publish**
 
 ```bash
 npm publish --access public
 ```
 
-- [ ] **Step 5: Verify the round trip**
+- [ ] **Step 6: Verify the round trip**
 
 ```bash
 cd /tmp && mkdir -p cue-installed && cd cue-installed
@@ -2905,7 +2922,7 @@ pi install npm:pi-skill-cue
 
 Start pi, run `/cue`, and confirm the status line appears.
 
-- [ ] **Step 6: Tag the release**
+- [ ] **Step 7: Tag the release**
 
 ```bash
 git tag v0.1.0
