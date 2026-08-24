@@ -171,19 +171,30 @@ git commit -m "chore: scaffold package with allowlist packaging and zero runtime
 ```ts
 // tests/types.test.ts
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG } from "../src/types.js";
+import { createDefaultConfig, DEFAULT_CONFIG } from "../src/types.js";
 
 describe("DEFAULT_CONFIG", () => {
   it("is advisory-only out of the box", () => {
     expect(DEFAULT_CONFIG.enabled).toBe(true);
     expect(DEFAULT_CONFIG.gates).toEqual({});
     expect(DEFAULT_CONFIG.escalate.enabled).toBe(false);
+    expect(DEFAULT_CONFIG.mute).toEqual([]);
+    expect(DEFAULT_CONFIG.triggers).toEqual({});
   });
 
-  it("caps injection volume", () => {
+  it("threshold is a normalised fraction so it stays comparable across catalogue sizes", () => {
     expect(DEFAULT_CONFIG.maxSkills).toBe(3);
     expect(DEFAULT_CONFIG.threshold).toBeGreaterThan(0);
     expect(DEFAULT_CONFIG.threshold).toBeLessThan(1);
+  });
+
+  it("hands out an independent config each call", () => {
+    const first = createDefaultConfig();
+    first.mute.push("x");
+    first.gates.alpha = { tools: ["write"] };
+    const second = createDefaultConfig();
+    expect(second.mute).toEqual([]);
+    expect(second.gates).toEqual({});
   });
 });
 ```
@@ -213,6 +224,13 @@ export interface SkillRecord {
   mtimeMs: number;
 }
 
+/**
+ * Why a skill matched.
+ * - "trigger": a "use when ..." phrase from the skill's own description matched.
+ * - "regex":   a user-configured regex from config.triggers matched.
+ * - "terms":   IDF-weighted term overlap between prompt and skill.
+ * - "context": a signal from the working directory matched.
+ */
 export type MatchReasonKind = "trigger" | "regex" | "terms" | "context";
 
 export interface MatchReason {
@@ -237,6 +255,12 @@ export interface GateConfig {
   tools: string[];
 }
 
+export interface EscalateConfig {
+  enabled: boolean;
+  /** Model id to consult, or null to use the session's active model. */
+  model: string | null;
+}
+
 export interface CueConfig {
   enabled: boolean;
   maxSkills: number;
@@ -250,22 +274,40 @@ export interface CueConfig {
   triggers: Record<string, string[]>;
   /** Skill name → gate configuration. */
   gates: Record<string, GateConfig>;
-  escalate: { enabled: boolean; model: string | null };
+  escalate: EscalateConfig;
 }
 
-export const DEFAULT_CONFIG: CueConfig = {
-  enabled: true,
-  maxSkills: 3,
-  threshold: 0.35,
-  verbose: false,
-  mute: [],
-  triggers: {},
-  gates: {},
-  escalate: { enabled: false, model: null },
-};
+/**
+ * A fresh config with independent children. Callers that merge over defaults MUST use this
+ * rather than spreading DEFAULT_CONFIG: a shallow spread shares `mute`, `triggers`, `gates`,
+ * and `escalate` by reference, so one mutation would corrupt defaults for every session.
+ */
+export function createDefaultConfig(): CueConfig {
+  return {
+    enabled: true,
+    maxSkills: 3,
+    threshold: 0.35,
+    verbose: false,
+    mute: [],
+    triggers: {},
+    gates: {},
+    escalate: { enabled: false, model: null },
+  };
+}
+
+/** Convenience snapshot for reads and assertions. Never mutate it; call createDefaultConfig() to own a copy. */
+export const DEFAULT_CONFIG: CueConfig = createDefaultConfig();
 
 export type LedgerEvent =
-  | { type: "inject"; ts: number; session: string; skill: string; score: number; reason: string }
+  | {
+      type: "inject";
+      ts: number;
+      session: string;
+      skill: string;
+      score: number;
+      /** `detail` of the highest-weighted MatchReason, e.g. the matched "use when" phrase. */
+      reason: string;
+    }
   | { type: "read"; ts: number; session: string; skill: string }
   | { type: "block"; ts: number; session: string; skill: string; tool: string }
   | { type: "error"; ts: number; session: string; where: string; message: string };
@@ -280,7 +322,7 @@ export interface SkillStats {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/types.test.ts`
-Expected: PASS, 2 tests.
+Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -492,7 +534,7 @@ Expected: FAIL — cannot find module `../src/config.js`.
 ```ts
 // src/config.ts
 import { readFileSync } from "node:fs";
-import { type CueConfig, DEFAULT_CONFIG, type GateConfig } from "./types.js";
+import { createDefaultConfig, type CueConfig, type GateConfig } from "./types.js";
 
 type PartialConfig = Partial<CueConfig>;
 
@@ -563,7 +605,8 @@ function sanitize(raw: unknown): PartialConfig {
 
 /** Merge per top-level key. A key present in the project layer replaces the global value. */
 export function mergeConfig(globalRaw: unknown, projectRaw: unknown): CueConfig {
-  return { ...DEFAULT_CONFIG, ...sanitize(globalRaw), ...sanitize(projectRaw) };
+  // createDefaultConfig(), not a spread of DEFAULT_CONFIG: the caller must own its children.
+  return { ...createDefaultConfig(), ...sanitize(globalRaw), ...sanitize(projectRaw) };
 }
 
 function readJson(path: string): unknown {
