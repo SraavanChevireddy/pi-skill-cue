@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Skill router for pi. Matches every prompt to the right skill, injects it where the model will actually see it, and optionally blocks work until it is read.",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "keywords": [
     "pi-package",
@@ -24,9 +25,13 @@
   },
   "scripts": {
     "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
     "bench": "tsx bench/run.ts",
     "check:leaks": "node scripts/check-leaks.mjs",
-    "prepublishOnly": "npm run test && npm run bench && npm run check:leaks --strict"
+    "prepublishOnly": "npm run typecheck && npm run test && npm run bench && npm run check:leaks -- --strict"
+  },
+  "engines": {
+    "node": ">=20.19.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
