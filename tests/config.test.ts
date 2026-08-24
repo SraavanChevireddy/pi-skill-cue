@@ -37,6 +37,51 @@ describe("mergeConfig", () => {
     const merged = mergeConfig({ gates: { alpha: { tools: "write" } } } as never, undefined);
     expect(merged.gates).toEqual({});
   });
+
+  it("keeps the lower layer when every entry in the upper layer is invalid", () => {
+    const merged = mergeConfig(
+      { gates: { alpha: { tools: ["write"] } } },
+      { gates: { beta: { tools: "write" } } } as never,
+    );
+    expect(merged.gates).toEqual({ alpha: { tools: ["write"] } });
+  });
+
+  it("honours an explicitly emptied gates object as a deliberate clear", () => {
+    const merged = mergeConfig({ gates: { alpha: { tools: ["write"] } } }, { gates: {} });
+    expect(merged.gates).toEqual({});
+  });
+
+  it("drops an unparseable regex but keeps the valid patterns beside it", () => {
+    const merged = mergeConfig({ triggers: { alpha: ["([unclosed", "\\bABC-\\d+\\b"] } }, undefined);
+    expect(merged.triggers).toEqual({ alpha: ["\\bABC-\\d+\\b"] });
+  });
+
+  it("drops a trigger entry whose every pattern is unparseable", () => {
+    const merged = mergeConfig({ triggers: { alpha: ["([unclosed"] } }, undefined);
+    expect(merged.triggers).toEqual({});
+  });
+
+  it("rejects a record supplied as an array instead of inventing numeric keys", () => {
+    const merged = mergeConfig({ gates: [{ tools: ["write"] }] } as never, undefined);
+    expect(merged.gates).toEqual({});
+  });
+
+  it("ignores prototype keys instead of polluting the result's prototype", () => {
+    const merged = mergeConfig(JSON.parse('{"gates":{"__proto__":{"tools":["write"]}}}'), undefined);
+    expect(merged.gates).toEqual({});
+    expect(Object.getPrototypeOf(merged.gates)).toEqual(Object.prototype);
+  });
+
+  it("normalises a non-string escalate model to null", () => {
+    expect(mergeConfig({ escalate: { enabled: true, model: 7 } } as never, undefined).escalate).toEqual({
+      enabled: true,
+      model: null,
+    });
+  });
+
+  it("truncates a fractional maxSkills", () => {
+    expect(mergeConfig({ maxSkills: 2.7 }, undefined).maxSkills).toBe(2);
+  });
 });
 
 describe("loadConfig", () => {
