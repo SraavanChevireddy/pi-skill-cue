@@ -755,12 +755,14 @@ Pi hands the extension a list of loaded skills. This unit normalises them into `
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/catalog.test.ts
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
-import { buildCatalog, parseSkillFile } from "../src/catalog.js";
+import { beforeEach, describe, expect, it } from "vitest";
+import { buildCatalog, clearCatalogCache, parseSkillFile } from "../src/catalog.js";
+
+/** Beat coarse filesystem mtime granularity when forcing a cache miss. */
+const MTIME_SKEW_MS = 5_000;
 
 function skillDir(name: string, body: string): string {
   const root = mkdtempSync(join(tmpdir(), "cue-skill-"));
@@ -770,6 +772,10 @@ function skillDir(name: string, body: string): string {
   writeFileSync(path, body);
   return path;
 }
+
+beforeEach(() => {
+  clearCatalogCache();
+});
 
 describe("parseSkillFile", () => {
   it("reads name and description from frontmatter", () => {
@@ -792,6 +798,21 @@ describe("parseSkillFile", () => {
   it("returns undefined for an absent file rather than throwing", () => {
     expect(parseSkillFile("/nonexistent/SKILL.md")).toBeUndefined();
   });
+
+  it("reads a folded block scalar description as one line", () => {
+    const path = skillDir(
+      "folded",
+      `---\nname: folded\ndescription: >\n  Use when handling a long description\n  that wraps onto two lines\n---\n`,
+    );
+    expect(parseSkillFile(path)?.description).toBe(
+      "Use when handling a long description that wraps onto two lines",
+    );
+  });
+
+  it("tolerates a byte-order mark before the frontmatter", () => {
+    const path = skillDir("bom", `\uFEFF---\nname: bom\ndescription: Use when handling encoded files\n---\n`);
+    expect(parseSkillFile(path)?.name).toBe("bom");
+  });
 });
 
 describe("buildCatalog", () => {
@@ -801,7 +822,7 @@ describe("buildCatalog", () => {
     expect(record?.name).toBe("systematic-debugging");
     expect(record?.triggerPhrases).toContain("encountering a failing test");
     expect(record?.terms).toContain("debugging");
-    expect(record?.mtimeMs).toBeGreaterThan(0);
+    expect(record?.mtimeMs).toBe(statSync(path).mtimeMs);
   });
 
   it("skips a skill whose file cannot be parsed instead of failing the catalogue", () => {
@@ -826,10 +847,48 @@ describe("buildCatalog", () => {
     const second = buildCatalog(input);
     expect(second[0]).toBe(first[0]);
 
-    const future = new Date(Date.now() + 5_000);
+    const future = new Date(Date.now() + MTIME_SKEW_MS);
     utimesSync(path, future, future);
     const third = buildCatalog(input);
     expect(third[0]).not.toBe(first[0]);
+  });
+
+  it("extracts trigger phrases from a folded description", () => {
+    const path = skillDir(
+      "wrapped",
+      `---\nname: wrapped\ndescription: >\n  Use when reviewing a pull request,\n  or leaving review comments\n---\n`,
+    );
+    const [record] = buildCatalog([{ name: "wrapped", path }]);
+    expect(record?.triggerPhrases).toContain("reviewing a pull request");
+  });
+
+  it("drops a skill whose file exists but has no frontmatter and no supplied description", () => {
+    const path = skillDir("bare", `# Bare\n\nNothing to parse.\n`);
+    expect(buildCatalog([{ name: "bare", path }])).toEqual([]);
+  });
+
+  it("freezes records so a consumer cannot corrupt the cache", () => {
+    const path = skillDir("frozen", `---\nname: frozen\ndescription: Use when freezing records solid\n---\n`);
+    const [record] = buildCatalog([{ name: "frozen", path }]);
+    expect(Object.isFrozen(record)).toBe(true);
+    expect(Object.isFrozen(record?.terms)).toBe(true);
+  });
+
+  it("evicts cache entries for skills that are no longer present", () => {
+    const path = skillDir("transient", `---\nname: transient\ndescription: Use when a skill disappears midway\n---\n`);
+    const first = buildCatalog([{ name: "transient", path }]);
+    expect(first).toHaveLength(1);
+    buildCatalog([]);
+    const third = buildCatalog([{ name: "transient", path }]);
+    expect(third[0]).not.toBe(first[0]);
+  });
+
+  it("treats a changed description from pi as a cache miss", () => {
+    const path = skillDir("changing", `---\nname: changing\ndescription: Use when descriptions change underneath us\n---\n`);
+    const first = buildCatalog([{ name: "changing", path, description: "Use when the first description applies" }]);
+    const second = buildCatalog([{ name: "changing", path, description: "Use when the second description applies" }]);
+    expect(second[0]?.description).toBe("Use when the second description applies");
+    expect(second[0]).not.toBe(first[0]);
   });
 });
 ```
@@ -842,7 +901,6 @@ Expected: FAIL — cannot find module `../src/catalog.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/catalog.ts
 import { readFileSync, statSync } from "node:fs";
 import { extractTriggerPhrases, tokenize } from "./text.js";
 import type { SkillRecord } from "./types.js";
@@ -876,23 +934,50 @@ export function parseSkillFile(path: string): ParsedSkill | undefined {
     return undefined;
   }
 
-  const block = FRONTMATTER.exec(raw)?.[1];
+  const block = FRONTMATTER.exec(raw.replace(/^\uFEFF/, ""))?.[1];
   if (!block) return undefined;
 
+  const lines = block.split(/\r?\n/);
   let name = "";
   let description = "";
-  for (const line of block.split(/\r?\n/)) {
-    const match = /^(name|description):\s*(.*)$/.exec(line);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^(name|description):\s*(.*)$/.exec(lines[index] ?? "");
     if (!match) continue;
-    if (match[1] === "name") name = unquote(match[2] ?? "");
-    else description = unquote(match[2] ?? "");
+
+    let value = unquote(match[2] ?? "");
+    // A block scalar indicator (or nothing) means the value is the indented lines that follow.
+    if (value === "" || value === ">" || value === ">-" || value === "|" || value === "|-") {
+      const continuation: string[] = [];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1] ?? "";
+        if (next.trim() === "") {
+          index += 1;
+          continue;
+        }
+        if (!/^\s/.test(next)) break;
+        continuation.push(next.trim());
+        index += 1;
+      }
+      value = continuation.join(" ").trim();
+    }
+
+    if (match[1] === "name") name = value;
+    else description = value;
   }
 
   if (!name) return undefined;
   return { name, description };
 }
 
-const cache = new Map<string, { mtimeMs: number; record: SkillRecord }>();
+interface CacheEntry {
+  mtimeMs: number;
+  size: number;
+  description: string | undefined;
+  record: SkillRecord;
+}
+
+const cache = new Map<string, CacheEntry>();
 
 /** Exposed for tests that need a cold cache. */
 export function clearCatalogCache(): void {
@@ -903,9 +988,13 @@ function makeRecord(input: SkillInput, mtimeMs: number): SkillRecord | undefined
   const parsed = parseSkillFile(input.path);
   const description = input.description ?? parsed?.description ?? "";
   const name = input.name || parsed?.name || "";
-  if (!name || (!description && !parsed)) return undefined;
+  if (!name) return undefined;
+  // A skill with neither a parseable file nor a description from pi has nothing to route on.
+  if (!parsed && !input.description) return undefined;
 
-  return {
+  // A parseable skill with an empty description is kept deliberately: it cannot match, and the
+  // doctor reports exactly that. Dropping it here would hide the problem from the user.
+  const record: SkillRecord = {
     name,
     path: input.path,
     description,
@@ -913,31 +1002,56 @@ function makeRecord(input: SkillInput, mtimeMs: number): SkillRecord | undefined
     terms: [...new Set(tokenize(`${name} ${description}`))],
     mtimeMs,
   };
+
+  Object.freeze(record.triggerPhrases);
+  Object.freeze(record.terms);
+  return Object.freeze(record);
 }
 
-/** Normalise pi's loaded skills into routing records. mtime-cached; unparseable skills are dropped. */
+/**
+ * Normalise pi's loaded skills into routing records. Cached by path, invalidated when the file's
+ * mtime or size changes or pi reports a different description. Unparseable skills are dropped,
+ * and entries for skills no longer present are evicted so a long session does not accumulate them.
+ */
 export function buildCatalog(inputs: SkillInput[]): SkillRecord[] {
   const records: SkillRecord[] = [];
+  const seen = new Set<string>();
 
   for (const input of inputs) {
     let mtimeMs: number;
+    let size: number;
     try {
-      mtimeMs = statSync(input.path).mtimeMs;
+      const stats = statSync(input.path);
+      mtimeMs = stats.mtimeMs;
+      size = stats.size;
     } catch {
       continue;
     }
 
-    const key = `${input.path}::${input.description ?? ""}`;
-    const cached = cache.get(key);
-    if (cached && cached.mtimeMs === mtimeMs) {
+    seen.add(input.path);
+    const cached = cache.get(input.path);
+    if (
+      cached &&
+      cached.mtimeMs === mtimeMs &&
+      cached.size === size &&
+      cached.description === input.description
+    ) {
       records.push(cached.record);
       continue;
     }
 
     const record = makeRecord(input, mtimeMs);
-    if (!record) continue;
-    cache.set(key, { mtimeMs, record });
+    if (!record) {
+      cache.delete(input.path);
+      continue;
+    }
+
+    cache.set(input.path, { mtimeMs, size, description: input.description, record });
     records.push(record);
+  }
+
+  for (const key of [...cache.keys()]) {
+    if (!seen.has(key)) cache.delete(key);
   }
 
   return records;
@@ -947,7 +1061,7 @@ export function buildCatalog(inputs: SkillInput[]): SkillRecord[] {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/catalog.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -2372,6 +2486,12 @@ git commit -m "feat: wire routing, gating, and commands into the pi extension"
 - Create: `bench/run.ts`
 - Create: `bench/baseline.json`
 - Test: `tests/bench.test.ts`
+
+**Realism constraint:** at least four corpus skills MUST describe themselves WITHOUT any
+"use when" phrasing (plain imperative descriptions, e.g. "Extracts fields from invoices and
+receipts"). Many real skills are written that way, so they yield zero trigger phrases and must be
+routed on term overlap alone. A corpus where every skill has a tidy trigger clause measures the
+easy case and inflates precision@1. Label at least four cases as expecting one of those skills.
 
 **Authoring constraint:** every skill in `bench/corpus.ts` is invented for this repository. No skill from any machine-local or private skill directory may be copied, quoted, paraphrased, or named. Use generic domains (parsers, invoices, widgets) and `ABC-123`-style keys.
 
