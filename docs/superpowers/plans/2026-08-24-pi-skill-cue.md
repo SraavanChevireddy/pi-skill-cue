@@ -2074,8 +2074,8 @@ git commit -m "feat: add local append-only ledger with failure-swallowing writes
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/doctor.test.ts
 import { describe, expect, it } from "vitest";
+import { deriveRoutingFields } from "../src/catalog.js";
 import { lintCatalog } from "../src/doctor.js";
 import type { SkillRecord, SkillStats } from "../src/types.js";
 
@@ -2084,9 +2084,8 @@ function rec(name: string, description: string): SkillRecord {
     name,
     path: `/fixtures/${name}/SKILL.md`,
     description,
-    triggerPhrases: description.toLowerCase().includes("use when") ? ["something specific here"] : [],
-    terms: [...new Set(`${name} ${description}`.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2))],
     mtimeMs: 1,
+    ...deriveRoutingFields(name, description),
   };
 }
 
@@ -2133,6 +2132,34 @@ describe("lintCatalog", () => {
     );
     expect(findings).toEqual([]);
   });
+
+  it("does not call two skills overlapping merely because both say 'use when'", () => {
+    const findings = lintCatalog(
+      [
+        rec("invoice-parsing", "Use when extracting fields from an invoice document or receipt"),
+        rec("release-checklist", "Use when cutting a release, tagging a version, or writing notes"),
+      ],
+      noStats,
+    );
+    expect(findings.some((f) => f.codes.includes("overlapping-description"))).toBe(false);
+  });
+
+  it("reports a finding for each skill in an overlapping pair", () => {
+    const findings = lintCatalog(
+      [
+        rec("alpha-review", "Use when reviewing a pull request and leaving comments on the diff"),
+        rec("beta-review", "Use when reviewing a pull request and leaving comments on the diff"),
+      ],
+      noStats,
+    );
+    expect(findings.map((f) => f.skill).sort()).toEqual(["alpha-review", "beta-review"]);
+  });
+
+  it("does not flag a skill that has been read at least once", () => {
+    const stats = new Map<string, SkillStats>([["epsilon", { injections: 9, reads: 1, blocks: 0 }]]);
+    const findings = lintCatalog([rec("epsilon", "Use when handling a documented epsilon situation")], stats);
+    expect(findings.some((f) => f.codes.includes("never-read"))).toBe(false);
+  });
 });
 ```
 
@@ -2144,7 +2171,7 @@ Expected: FAIL — cannot find module `../src/doctor.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/doctor.ts
+import { tokenize } from "./text.js";
 import type { SkillRecord, SkillStats } from "./types.js";
 
 export type LintCode =
@@ -2174,6 +2201,15 @@ function jaccard(a: string[], b: string[]): number {
   return shared / (setA.size + setB.size - shared);
 }
 
+/**
+ * Description terms only, via the router's own tokenizer so filler words cannot inflate
+ * similarity. Deliberately not `record.terms`, which folds in the skill name: two skills with the
+ * same description and different names genuinely overlap, and that is what this rule must catch.
+ */
+function descriptionTerms(record: SkillRecord): string[] {
+  return tokenize(record.description);
+}
+
 function suggestionFor(record: SkillRecord, codes: LintCode[]): string {
   if (codes.includes("description-too-short") || codes.includes("no-trigger-clause")) {
     return `Rewrite as: "Use when <situation>, <situation>, or <situation>." naming the words a user would actually type when they need ${record.name}.`;
@@ -2184,7 +2220,7 @@ function suggestionFor(record: SkillRecord, codes: LintCode[]): string {
   if (codes.includes("never-read")) {
     return "The router surfaces this skill but the model declines to read it. Sharpen the trigger clause, or add a gate if it is mandatory.";
   }
-  return `Include the words from the skill name in the description so both match paths agree.`;
+  return "Include the words from the skill name in the description so both match paths agree.";
 }
 
 /** Lint a catalogue for routability problems. Pure given stats. */
@@ -2200,9 +2236,10 @@ export function lintCatalog(
     if (record.description.trim().length < MIN_DESCRIPTION_LENGTH) codes.push("description-too-short");
     if (record.triggerPhrases.length === 0) codes.push("no-trigger-clause");
 
+    // All-pairs comparison. Catalogues are tens of skills, so O(n^2) is not worth avoiding here.
     for (const other of records) {
       if (other.name === record.name) continue;
-      if (jaccard(record.terms, other.terms) >= OVERLAP_THRESHOLD) {
+      if (jaccard(descriptionTerms(record), descriptionTerms(other)) >= OVERLAP_THRESHOLD) {
         codes.push("overlapping-description");
         break;
       }
@@ -2211,9 +2248,9 @@ export function lintCatalog(
     const stat = stats.get(record.name);
     if (stat && stat.injections >= NEVER_READ_INJECTIONS && stat.reads === 0) codes.push("never-read");
 
-    const nameTerms = record.name.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
-    const descTerms = record.description.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
-    if (nameTerms.length > 0 && !nameTerms.some((t) => descTerms.includes(t))) {
+    const nameTerms = tokenize(record.name);
+    const descTerms = new Set(descriptionTerms(record));
+    if (nameTerms.length > 0 && !nameTerms.some((term) => descTerms.has(term))) {
       codes.push("name-description-disjoint");
     }
 
@@ -2234,7 +2271,7 @@ export function lintCatalog(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/doctor.test.ts`
-Expected: PASS, 6 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
 
