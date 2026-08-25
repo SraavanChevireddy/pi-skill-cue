@@ -7,3 +7,4 @@ dist/
 .env.*
 .leakpatterns.local
 .DS_Store
+coverage/
