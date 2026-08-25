@@ -64,6 +64,15 @@ describe("CueRuntime.onToolCall", () => {
     const rt = runtime({ ...DEFAULT_CONFIG, gates: { "test-driven-development": { tools: ["write"] } } });
     expect(rt.onToolCall("write", { path: "/tmp/out.ts" })).toBeUndefined();
   });
+
+  it("treats an explicit skill invocation as satisfying the gate", () => {
+    const tdd = skill("test-driven-development", "Use when implementing any feature or bugfix");
+    const rt = runtime({ ...DEFAULT_CONFIG, gates: { "test-driven-development": { tools: ["write"] } } });
+    rt.onPrompt("implementing any feature", [tdd], []);
+    expect(rt.onToolCall("write", { path: "/tmp/out.ts" })?.block).toBe(true);
+    rt.markSkillUsed("test-driven-development");
+    expect(rt.onToolCall("write", { path: "/tmp/out.ts" })).toBeUndefined();
+  });
 });
 
 describe("CueRuntime reporting", () => {

@@ -38,6 +38,14 @@ function cwdExtensions(cwd: string): string[] {
   }
 }
 
+/**
+ * Report and doctor output is multi-line and meant to be read, so it goes into the transcript
+ * rather than a toast. triggerTurn is false: showing a report must not start an LLM turn.
+ */
+function show(pi: ExtensionAPI, content: string): void {
+  pi.sendMessage({ customType: "skill-cue-report", content, display: true }, { triggerTurn: false });
+}
+
 /** Read/edit/write are the only tool calls that carry a path, and the only ones a gate can guard. */
 function toolPath(event: ToolCallEvent): string | undefined {
   if (isToolCallEventType("read", event)) return event.input.path;
@@ -107,6 +115,16 @@ export default function activate(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("input", async (event, ctx) => {
+    try {
+      const invoked = /^\s*\/skill:(\S+)/.exec(event.text);
+      if (invoked?.[1]) sessionFor(ctx).runtime.markSkillUsed(invoked[1]);
+    } catch {
+      // Fail open: never interfere with the user's input.
+    }
+    return { action: "continue" };
+  });
+
   pi.registerCommand("cue", {
     description: "pi-skill-cue status, or on/off for this session",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -133,14 +151,14 @@ export default function activate(pi: ExtensionAPI): void {
         ctx.ui.notify("pi-skill-cue ledger purged", "info");
         return;
       }
-      ctx.ui.notify(session.runtime.report(), "info");
+      show(pi, session.runtime.report());
     },
   });
 
   pi.registerCommand("skill-doctor", {
     description: "Lint installed skills for routability problems",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      ctx.ui.notify(sessionFor(ctx).runtime.doctor(), "info");
+      show(pi, sessionFor(ctx).runtime.doctor());
     },
   });
 }
