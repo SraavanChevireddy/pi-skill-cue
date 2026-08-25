@@ -32,4 +32,14 @@ describe("benchmark", () => {
     expect(result.recallAt3).toBeGreaterThanOrEqual(baseline.recallAt3);
     expect(result.falsePositiveRate).toBeLessThanOrEqual(baseline.falsePositiveRate);
   });
+
+  it("meets the committed baseline on the hard subset", () => {
+    const result = evaluate();
+    expect(result.hardPrecisionAt1).toBeGreaterThanOrEqual(baseline.hardPrecisionAt1);
+  });
+
+  it("has enough hard cases for that number to mean something", () => {
+    const result = evaluate();
+    expect(result.hardCases).toBeGreaterThanOrEqual(6);
+  });
 });

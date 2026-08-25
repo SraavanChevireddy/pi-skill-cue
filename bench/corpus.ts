@@ -1,4 +1,4 @@
-import { extractTriggerPhrases, tokenize } from "../src/text.js";
+import { deriveRoutingFields } from "../src/catalog.js";
 import type { SkillRecord } from "../src/types.js";
 
 interface Seed {
@@ -33,7 +33,6 @@ export const CORPUS: SkillRecord[] = SEEDS.map((seed, index) => ({
   name: seed.name,
   path: `/fixtures/${seed.name}/SKILL.md`,
   description: seed.description,
-  triggerPhrases: extractTriggerPhrases(seed.description),
-  terms: [...new Set(tokenize(`${seed.name} ${seed.description}`))],
+  ...deriveRoutingFields(seed.name, seed.description),
   mtimeMs: index + 1,
 }));

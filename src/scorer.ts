@@ -2,9 +2,9 @@ import { tokenize } from "./text.js";
 import type { CueConfig, MatchReason, RankedMatch, ScoreSignals, SkillRecord } from "./types.js";
 
 /** Weight of a matched "use when" phrase from the skill's own description. */
-const WEIGHT_TRIGGER = 0.6;
+const WEIGHT_TRIGGER = 0.55;
 /** Weight of IDF-weighted term overlap between the prompt and the skill. */
-const WEIGHT_TERMS = 0.6;
+const WEIGHT_TERMS = 0.55;
 /** Bonus when a working-directory signal agrees. Deliberately small: it is weak evidence. */
 const WEIGHT_CONTEXT = 0.1;
 /** A user-configured regex is a declaration of certainty, so it outranks anything inferred. */

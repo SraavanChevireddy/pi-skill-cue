@@ -8,6 +8,9 @@ export interface BenchResult {
   recallAt3: number;
   falsePositiveRate: number;
   cases: number;
+  /** precision@1 over the cases flagged hard: low vocabulary overlap with the description. */
+  hardPrecisionAt1: number;
+  hardCases: number;
 }
 
 const CONFIG = { ...DEFAULT_CONFIG, triggers: { "ticket-intake": ["\\b[A-Z]{2,}-\\d{3,}\\b"] } };
@@ -22,6 +25,8 @@ export function evaluate(): BenchResult {
   let inTop3 = 0;
   let negatives = 0;
   let falsePositives = 0;
+  let hardPositives = 0;
+  let hardTop1 = 0;
 
   for (const testCase of CASES) {
     const matches = scoreSkills(CORPUS, { prompt: testCase.prompt, cwdExtensions: [] }, CONFIG);
@@ -31,8 +36,14 @@ export function evaluate(): BenchResult {
       continue;
     }
     positives += 1;
-    if (matches[0]?.skill.name === testCase.expected) top1 += 1;
+    const top1Match = matches[0]?.skill.name === testCase.expected;
+    if (top1Match) top1 += 1;
     if (matches.slice(0, 3).some((m) => m.skill.name === testCase.expected)) inTop3 += 1;
+
+    if (testCase.hard === true) {
+      hardPositives += 1;
+      if (top1Match) hardTop1 += 1;
+    }
   }
 
   return {
@@ -40,6 +51,8 @@ export function evaluate(): BenchResult {
     recallAt3: round(positives === 0 ? 0 : inTop3 / positives),
     falsePositiveRate: round(negatives === 0 ? 0 : falsePositives / negatives),
     cases: CASES.length,
+    hardPrecisionAt1: round(hardPositives === 0 ? 0 : hardTop1 / hardPositives),
+    hardCases: hardPositives,
   };
 }
 
@@ -50,4 +63,5 @@ if (isMain) {
   console.log(`precision@1:       ${result.precisionAt1}`);
   console.log(`recall@3:          ${result.recallAt3}`);
   console.log(`falsePositiveRate: ${result.falsePositiveRate}`);
+  console.log(`hard precision@1:  ${result.hardPrecisionAt1} (${result.hardCases} cases)`);
 }

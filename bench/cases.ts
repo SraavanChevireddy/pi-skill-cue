@@ -4,6 +4,8 @@ export interface BenchCase {
   expected: string | null;
   /** True when the prompt deliberately avoids the description's wording. */
   paraphrase?: boolean;
+  /** True when the prompt shares little vocabulary with the description, so routing must infer. */
+  hard?: boolean;
 }
 
 export const CASES: BenchCase[] = [
@@ -44,4 +46,20 @@ export const CASES: BenchCase[] = [
   { prompt: "hello", expected: null },
   { prompt: "thanks, that worked", expected: null },
   { prompt: "can you order me a coffee", expected: null },
+
+  // Hard positives: little or no shared vocabulary with the target description.
+  { prompt: "the build is green on my machine but red on the server", expected: "flaky-test-quarantine", hard: true },
+  { prompt: "customers said the site was unreachable around midnight, work out what happened", expected: "log-forensics", hard: true },
+  { prompt: "make the wording in this guide snappier", expected: "copy-editing", hard: true },
+  { prompt: "we need to add a field to store the customer's phone number", expected: "schema-migration", hard: true },
+  { prompt: "somebody needs to check this package is safe before we pull it in", expected: "dependency-audit", hard: true },
+  { prompt: "the numbers in the statement and our books disagree", expected: "invoice-reconciliation", hard: true },
+
+  // Hard negatives: plausible engineering prompts that no skill in this corpus covers.
+  { prompt: "refactor this react component into smaller pieces", expected: null },
+  { prompt: "set up a kubernetes ingress for the staging cluster", expected: null },
+  { prompt: "convert these callbacks to async await", expected: null },
+  { prompt: "explain what this regular expression matches", expected: null },
+  { prompt: "why is my css grid overlapping on mobile", expected: null },
+  { prompt: "what is the time complexity of this loop", expected: null },
 ];
