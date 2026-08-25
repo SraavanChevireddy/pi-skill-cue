@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "description": "Skill router for pi. Matches every prompt to the right skill, injects it where the model will actually see it, and optionally blocks work until it is read.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "keywords": [
     "pi-package",
@@ -12,6 +11,14 @@
     "router",
     "skills"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SraavanChevireddy/pi-skill-cue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SraavanChevireddy/pi-skill-cue/issues"
+  },
+  "homepage": "https://github.com/SraavanChevireddy/pi-skill-cue#readme",
   "files": [
     "extensions/",
     "src/",
@@ -23,15 +30,15 @@
       "./extensions"
     ]
   },
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
     "bench": "tsx bench/run.ts",
     "check:leaks": "node scripts/check-leaks.mjs",
     "prepublishOnly": "npm run typecheck && npm run test && npm run bench && npm run check:leaks -- --strict"
-  },
-  "engines": {
-    "node": ">=20.19.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
