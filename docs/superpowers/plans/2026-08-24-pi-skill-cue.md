@@ -2707,9 +2707,25 @@ export class CueRuntime {
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  Skill,
+} from "@earendil-works/pi-coding-agent";
+import type { SkillInput } from "../src/catalog.js";
 import { loadConfig } from "../src/config.js";
 import { CueRuntime } from "../src/runtime.js";
+
+/**
+ * Pi's Skill carries the SKILL.md location as `filePath`, and marks skills the model is not meant
+ * to invoke on its own. Routing one of those would be arguing with the user's own configuration.
+ */
+function toSkillInputs(skills: readonly Skill[]): SkillInput[] {
+  return skills
+    .filter((skill) => !skill.disableModelInvocation)
+    .map((skill) => ({ name: skill.name, path: skill.filePath, description: skill.description }));
+}
 
 function cwdExtensions(cwd: string): string[] {
   try {
@@ -2740,7 +2756,7 @@ export default function activate(pi: ExtensionAPI, ctx: ExtensionContext): void 
 
   pi.on("before_agent_start", async (event) => {
     try {
-      const skills = (event.systemPromptOptions?.skills ?? []) as { name: string; path: string; description?: string }[];
+      const skills = toSkillInputs(event.systemPromptOptions?.skills ?? []);
       const result = runtime.onPrompt(event.prompt ?? "", skills, cwdExtensions(ctx.cwd));
       if (!result) return undefined;
 
@@ -2767,7 +2783,7 @@ export default function activate(pi: ExtensionAPI, ctx: ExtensionContext): void 
 
   pi.registerCommand("cue", {
     description: "pi-skill-cue status, or on/off for this session",
-    handler: async (args: string) => {
+    handler: async (args: string, _commandCtx: ExtensionCommandContext) => {
       const arg = args.trim().toLowerCase();
       if (arg === "off" || arg === "on") {
         runtime.setEnabled(arg === "on");
@@ -2783,7 +2799,7 @@ export default function activate(pi: ExtensionAPI, ctx: ExtensionContext): void 
 
   pi.registerCommand("cue-report", {
     description: "Show which skills actually fire; --purge clears the local ledger",
-    handler: async (args: string) => {
+    handler: async (args: string, _commandCtx: ExtensionCommandContext) => {
       if (args.trim() === "--purge") {
         runtime.purge();
         ctx.ui.notify("pi-skill-cue ledger purged", "info");
@@ -2795,7 +2811,7 @@ export default function activate(pi: ExtensionAPI, ctx: ExtensionContext): void 
 
   pi.registerCommand("skill-doctor", {
     description: "Lint installed skills for routability problems",
-    handler: async () => {
+    handler: async (_args: string, _commandCtx: ExtensionCommandContext) => {
       ctx.ui.notify(runtime.doctor(), "info");
     },
   });
@@ -2807,7 +2823,15 @@ export default function activate(pi: ExtensionAPI, ctx: ExtensionContext): void 
 Run: `npx vitest run tests/runtime.test.ts && npx tsc --noEmit`
 Expected: PASS, 9 tests, and no type errors.
 
-> If `tsc` reports that a pi API member (`registerCommand` options shape, `systemPromptOptions.skills` element type, `sessionManager.getSessionId`) does not match, correct `extensions/skill-cue.ts` against the installed `@earendil-works/pi-coding-agent` types — never by loosening `src/runtime.ts`, which must stay free of pi types.
+> `@earendil-works/pi-coding-agent` is installed as a devDependency so these types resolve; it stays
+> in `peerDependencies` because pi provides it at runtime. If `tsc` reports that a pi API member does
+> not match, correct `extensions/skill-cue.ts` against the installed types — never by loosening
+> `src/runtime.ts`, which must stay free of pi types. Verified shapes at the time of writing:
+> `Skill` is `{ name, description, filePath, baseDir, sourceInfo, disableModelInvocation }`;
+> `BeforeAgentStartEvent` is `{ prompt, images?, systemPrompt, systemPromptOptions }`;
+> `BeforeAgentStartEventResult` is `{ message?, systemPrompt? }`; `registerCommand(name, options)`
+> takes `handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>`; and
+> `ctx.ui.notify(message, type?)` accepts `"info" | "warning" | "error"`.
 
 - [ ] **Step 5: Commit**
 
