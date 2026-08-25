@@ -1,0 +1,42 @@
+import { describe, expect, it } from "vitest";
+import { renderDoctor, renderReport } from "../src/report.js";
+import type { SkillRecord, SkillStats } from "../src/types.js";
+
+const records: SkillRecord[] = [
+  { name: "alpha", path: "/fixtures/alpha/SKILL.md", description: "Use when doing alpha work here", triggerPhrases: ["doing alpha work"], terms: ["alpha"], mtimeMs: 1 },
+  { name: "beta", path: "/fixtures/beta/SKILL.md", description: "Use when doing beta work here", triggerPhrases: ["doing beta work"], terms: ["beta"], mtimeMs: 1 },
+];
+
+describe("renderReport", () => {
+  it("lists every installed skill with its counts", () => {
+    const stats = new Map<string, SkillStats>([["alpha", { injections: 3, reads: 2, blocks: 1 }]]);
+    const text = renderReport(records, stats);
+    expect(text).toContain("alpha");
+    expect(text).toContain("beta");
+    expect(text).toMatch(/alpha\s+\|\s+3\s+\|\s+2\s+\|\s+1/);
+  });
+
+  it("summarises how many skills have never fired", () => {
+    const text = renderReport(records, new Map([["alpha", { injections: 1, reads: 1, blocks: 0 }]]));
+    expect(text).toContain("1 of 2 skills have never fired");
+  });
+
+  it("handles an empty catalogue without throwing", () => {
+    expect(renderReport([], new Map())).toContain("No skills loaded");
+  });
+});
+
+describe("renderDoctor", () => {
+  it("reports a clean bill of health", () => {
+    expect(renderDoctor([])).toContain("No routability problems found");
+  });
+
+  it("lists findings with codes and a suggestion", () => {
+    const text = renderDoctor([
+      { skill: "alpha", path: "/fixtures/alpha/SKILL.md", codes: ["no-trigger-clause"], suggestion: "Rewrite it." },
+    ]);
+    expect(text).toContain("alpha");
+    expect(text).toContain("no-trigger-clause");
+    expect(text).toContain("Rewrite it.");
+  });
+});
