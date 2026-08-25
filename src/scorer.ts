@@ -2,15 +2,15 @@ import { tokenize } from "./text.js";
 import type { CueConfig, MatchReason, RankedMatch, ScoreSignals, SkillRecord } from "./types.js";
 
 /** Weight of a matched "use when" phrase from the skill's own description. */
-const WEIGHT_TRIGGER = 0.55;
+const WEIGHT_TRIGGER = 0.6;
 /** Weight of IDF-weighted term overlap between the prompt and the skill. */
-const WEIGHT_TERMS = 0.45;
+const WEIGHT_TERMS = 0.6;
 /** Bonus when a working-directory signal agrees. Deliberately small: it is weak evidence. */
 const WEIGHT_CONTEXT = 0.1;
 /** A user-configured regex is a declaration of certainty, so it outranks anything inferred. */
 const REGEX_SCORE = 1;
 /** A phrase counts as matched when this fraction of its significant words appear in the prompt. */
-const PARTIAL_PHRASE_RATIO = 0.6;
+const PARTIAL_PHRASE_RATIO = 0.5;
 /**
  * Weight given to a prompt term that appears nowhere in the catalogue. Such a term can never be
  * matched, so it only dilutes the denominator; this keeps that dilution bounded and explicit.
