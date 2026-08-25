@@ -2920,7 +2920,6 @@ easy case and inflates precision@1. Label at least four cases as expecting one o
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/bench.test.ts
 import { describe, expect, it } from "vitest";
 import { CORPUS } from "../bench/corpus.js";
 import { CASES } from "../bench/cases.js";
@@ -2955,6 +2954,16 @@ describe("benchmark", () => {
     expect(result.recallAt3).toBeGreaterThanOrEqual(baseline.recallAt3);
     expect(result.falsePositiveRate).toBeLessThanOrEqual(baseline.falsePositiveRate);
   });
+
+  it("meets the committed baseline on the hard subset", () => {
+    const result = evaluate();
+    expect(result.hardPrecisionAt1).toBeGreaterThanOrEqual(baseline.hardPrecisionAt1);
+  });
+
+  it("has enough hard cases for that number to mean something", () => {
+    const result = evaluate();
+    expect(result.hardCases).toBeGreaterThanOrEqual(6);
+  });
 });
 ```
 
@@ -2966,8 +2975,7 @@ Expected: FAIL — cannot find module `../bench/corpus.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// bench/corpus.ts
-import { extractTriggerPhrases, tokenize } from "../src/text.js";
+import { deriveRoutingFields } from "../src/catalog.js";
 import type { SkillRecord } from "../src/types.js";
 
 interface Seed {
@@ -2976,85 +2984,106 @@ interface Seed {
 }
 
 /**
- * Invented skills, authored for this benchmark. Deliberately includes near-neighbour pairs
- * (invoice-parsing vs invoice-reconciliation) so the scorer is measured on hard cases.
+ * Invented skills, authored for this benchmark only. Deliberately includes near-neighbour pairs
+ * (invoice-line-extraction vs invoice-reconciliation) so the scorer is measured on hard cases,
+ * and several skills below are written imperatively with no "use when" clause at all, because
+ * many real skills are authored that way and must be routed on term overlap alone.
  */
 const SEEDS: Seed[] = [
   { name: "failing-test-triage", description: "Use when a test is failing, a suite is red, or behaviour does not match expectations, before changing implementation code" },
-  { name: "invoice-parsing", description: "Use when extracting fields from an invoice document, a receipt, or a scanned bill" },
+  { name: "invoice-line-extraction", description: "Extracts structured fields from invoices and receipts, including totals, dates, and line items." },
   { name: "invoice-reconciliation", description: "Use when matching invoice totals against ledger entries, or chasing a payment discrepancy" },
-  { name: "widget-calibration", description: "Use when calibrating a widget sensor, adjusting tolerance ranges, or resetting a device baseline" },
+  { name: "widget-sensor-calibration", description: "Calibrates widget sensor tolerances and resets device baselines before a shipment." },
   { name: "banner-artwork", description: "Use when designing a banner, a social image, or promotional artwork for a campaign" },
   { name: "release-checklist", description: "Use when cutting a release, tagging a version, or preparing release notes for shipping" },
-  { name: "schema-migration", description: "Use when altering a database table, adding a column, or writing a migration script" },
+  { name: "schema-migration", description: "Writes and applies database migration scripts, adding or altering table columns." },
   { name: "flaky-test-quarantine", description: "Use when a test passes locally but fails intermittently in continuous integration" },
-  { name: "ticket-intake", description: "Use when the user references a tracked work item by key, or asks to triage a reported issue" },
+  { name: "ticket-intake", description: "Use when the user references a tracked work item by key such as ABC-123, or asks to triage a reported issue" },
   { name: "api-contract-review", description: "Use when changing a public endpoint, altering a response payload, or versioning an interface" },
-  { name: "log-forensics", description: "Use when searching production logs for the cause of an outage, error spike, or timeout" },
+  { name: "log-forensics", description: "Searches production logs to find the root cause of outages, error spikes, and request timeouts." },
   { name: "onboarding-walkthrough", description: "Use when a new contributor needs the local setup path, or asks how to run the project for the first time" },
   { name: "dependency-audit", description: "Use when adding a third party library, bumping a version, or reviewing a vulnerability advisory" },
-  { name: "copy-editing", description: "Use when tightening written prose, fixing tone, or rewriting documentation for clarity" },
+  { name: "copy-editing", description: "Tightens written prose, adjusts tone, and rewrites documentation for clarity." },
 ];
 
 export const CORPUS: SkillRecord[] = SEEDS.map((seed, index) => ({
   name: seed.name,
   path: `/fixtures/${seed.name}/SKILL.md`,
   description: seed.description,
-  triggerPhrases: extractTriggerPhrases(seed.description),
-  terms: [...new Set(tokenize(`${seed.name} ${seed.description}`))],
+  ...deriveRoutingFields(seed.name, seed.description),
   mtimeMs: index + 1,
 }));
 ```
 
 ```ts
-// bench/cases.ts
-
 export interface BenchCase {
   prompt: string;
   /** Expected top skill, or null when nothing should match. */
   expected: string | null;
   /** True when the prompt deliberately avoids the description's wording. */
   paraphrase?: boolean;
+  /** True when the prompt shares little vocabulary with the description, so routing must infer. */
+  hard?: boolean;
 }
 
 export const CASES: BenchCase[] = [
   { prompt: "my test suite is red after the last change", expected: "failing-test-triage" },
-  { prompt: "this assertion keeps blowing up and I cannot see why", expected: "failing-test-triage", paraphrase: true },
-  { prompt: "pull the line items out of this scanned bill", expected: "invoice-parsing" },
-  { prompt: "extract fields from an invoice document", expected: "invoice-parsing" },
+  { prompt: "this test's assertion keeps blowing up and I cannot see why", expected: "failing-test-triage", paraphrase: true },
+  { prompt: "pull the line items and totals out of this scanned bill", expected: "invoice-line-extraction" },
+  { prompt: "extract the dates and totals from this invoice document", expected: "invoice-line-extraction" },
+  { prompt: "grab the fields off these receipts for me", expected: "invoice-line-extraction", paraphrase: true },
   { prompt: "the invoice total does not match our ledger entries", expected: "invoice-reconciliation" },
   { prompt: "chase down a payment discrepancy from last month", expected: "invoice-reconciliation" },
-  { prompt: "recalibrate the widget sensor tolerance", expected: "widget-calibration" },
-  { prompt: "reset the device baseline before shipping", expected: "widget-calibration", paraphrase: true },
+  { prompt: "recalibrate the widget sensor tolerance", expected: "widget-sensor-calibration" },
+  { prompt: "reset the device baseline before shipment", expected: "widget-sensor-calibration" },
+  { prompt: "the widget's sensor tolerances need adjusting before shipment", expected: "widget-sensor-calibration", paraphrase: true },
   { prompt: "design a banner for the spring campaign", expected: "banner-artwork" },
   { prompt: "I need promotional artwork for social", expected: "banner-artwork" },
   { prompt: "cut a release and write the release notes", expected: "release-checklist" },
-  { prompt: "tag version 2.1 and ship it", expected: "release-checklist", paraphrase: true },
-  { prompt: "add a column to the accounts table", expected: "schema-migration" },
-  { prompt: "write a migration script for the new field", expected: "schema-migration" },
+  { prompt: "tagging version 2.1 before shipping", expected: "release-checklist" },
+  { prompt: "adding columns to the accounts table", expected: "schema-migration" },
+  { prompt: "run the database migration scripts to add this new field", expected: "schema-migration" },
+  { prompt: "altering the table structure with a database migration", expected: "schema-migration", paraphrase: true },
   { prompt: "this test passes locally but fails in CI at random", expected: "flaky-test-quarantine" },
-  { prompt: "intermittent failure only on the build server", expected: "flaky-test-quarantine", paraphrase: true },
+  { prompt: "this test intermittently fails in our CI pipeline but passes locally every time", expected: "flaky-test-quarantine", paraphrase: true },
   { prompt: "take a look at ABC-1234 and triage it", expected: "ticket-intake" },
   { prompt: "triage this reported issue for me", expected: "ticket-intake" },
   { prompt: "we are changing the response payload of the search endpoint", expected: "api-contract-review" },
   { prompt: "version the public interface before clients break", expected: "api-contract-review", paraphrase: true },
   { prompt: "search production logs for the cause of the outage", expected: "log-forensics" },
   { prompt: "there was an error spike at 3am, find out why", expected: "log-forensics" },
+  { prompt: "we are seeing timeouts, dig through the production logs to find the cause", expected: "log-forensics", paraphrase: true },
   { prompt: "how do I run this project for the first time", expected: "onboarding-walkthrough" },
   { prompt: "new contributor needs the local setup path", expected: "onboarding-walkthrough" },
   { prompt: "review this vulnerability advisory before we bump the version", expected: "dependency-audit" },
   { prompt: "we are adding a third party library for parsing", expected: "dependency-audit" },
   { prompt: "tighten this prose and fix the tone", expected: "copy-editing" },
   { prompt: "rewrite the documentation for clarity", expected: "copy-editing" },
+  { prompt: "clean up the prose in this README for clarity", expected: "copy-editing", paraphrase: true },
   { prompt: "what is the capital of France", expected: null },
   { prompt: "hello", expected: null },
   { prompt: "thanks, that worked", expected: null },
-  { prompt: "what time is the standup", expected: null },
+  { prompt: "can you order me a coffee", expected: null },
+
+  // Hard positives: little or no shared vocabulary with the target description.
+  { prompt: "the build is green on my machine but red on the server", expected: "flaky-test-quarantine", hard: true },
+  { prompt: "customers said the site was unreachable around midnight, work out what happened", expected: "log-forensics", hard: true },
+  { prompt: "make the wording in this guide snappier", expected: "copy-editing", hard: true },
+  { prompt: "we need to add a field to store the customer's phone number", expected: "schema-migration", hard: true },
+  { prompt: "somebody needs to check this package is safe before we pull it in", expected: "dependency-audit", hard: true },
+  { prompt: "the numbers in the statement and our books disagree", expected: "invoice-reconciliation", hard: true },
+
+  // Hard negatives: plausible engineering prompts that no skill in this corpus covers.
+  { prompt: "refactor this react component into smaller pieces", expected: null },
+  { prompt: "set up a kubernetes ingress for the staging cluster", expected: null },
+  { prompt: "convert these callbacks to async await", expected: null },
+  { prompt: "explain what this regular expression matches", expected: null },
+  { prompt: "why is my css grid overlapping on mobile", expected: null },
+  { prompt: "what is the time complexity of this loop", expected: null },
 ];
 ```
 
 ```ts
-// bench/run.ts
 import { scoreSkills } from "../src/scorer.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import { CORPUS } from "./corpus.js";
@@ -3065,6 +3094,9 @@ export interface BenchResult {
   recallAt3: number;
   falsePositiveRate: number;
   cases: number;
+  /** precision@1 over the cases flagged hard: low vocabulary overlap with the description. */
+  hardPrecisionAt1: number;
+  hardCases: number;
 }
 
 const CONFIG = { ...DEFAULT_CONFIG, triggers: { "ticket-intake": ["\\b[A-Z]{2,}-\\d{3,}\\b"] } };
@@ -3079,6 +3111,8 @@ export function evaluate(): BenchResult {
   let inTop3 = 0;
   let negatives = 0;
   let falsePositives = 0;
+  let hardPositives = 0;
+  let hardTop1 = 0;
 
   for (const testCase of CASES) {
     const matches = scoreSkills(CORPUS, { prompt: testCase.prompt, cwdExtensions: [] }, CONFIG);
@@ -3088,8 +3122,14 @@ export function evaluate(): BenchResult {
       continue;
     }
     positives += 1;
-    if (matches[0]?.skill.name === testCase.expected) top1 += 1;
+    const top1Match = matches[0]?.skill.name === testCase.expected;
+    if (top1Match) top1 += 1;
     if (matches.slice(0, 3).some((m) => m.skill.name === testCase.expected)) inTop3 += 1;
+
+    if (testCase.hard === true) {
+      hardPositives += 1;
+      if (top1Match) hardTop1 += 1;
+    }
   }
 
   return {
@@ -3097,6 +3137,8 @@ export function evaluate(): BenchResult {
     recallAt3: round(positives === 0 ? 0 : inTop3 / positives),
     falsePositiveRate: round(negatives === 0 ? 0 : falsePositives / negatives),
     cases: CASES.length,
+    hardPrecisionAt1: round(hardPositives === 0 ? 0 : hardTop1 / hardPositives),
+    hardCases: hardPositives,
   };
 }
 
@@ -3107,6 +3149,7 @@ if (isMain) {
   console.log(`precision@1:       ${result.precisionAt1}`);
   console.log(`recall@3:          ${result.recallAt3}`);
   console.log(`falsePositiveRate: ${result.falsePositiveRate}`);
+  console.log(`hard precision@1:  ${result.hardPrecisionAt1} (${result.hardCases} cases)`);
 }
 ```
 
@@ -3120,9 +3163,10 @@ Write the observed numbers into `bench/baseline.json`, rounded **down** to two d
 
 ```json
 {
-  "precisionAt1": 0.75,
-  "recallAt3": 0.85,
-  "falsePositiveRate": 0.25
+  "precisionAt1": 0.82,
+  "recallAt3": 0.82,
+  "falsePositiveRate": 0,
+  "hardPrecisionAt1": 0
 }
 ```
 
@@ -3131,7 +3175,7 @@ Write the observed numbers into `bench/baseline.json`, rounded **down** to two d
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/bench.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commit**
 
