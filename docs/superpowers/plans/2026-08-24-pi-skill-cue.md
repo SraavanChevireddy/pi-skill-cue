@@ -2291,14 +2291,14 @@ git commit -m "feat: add skill-doctor lint rules for unroutable skills"
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/report.test.ts
 import { describe, expect, it } from "vitest";
+import { deriveRoutingFields } from "../src/catalog.js";
 import { renderDoctor, renderReport } from "../src/report.js";
 import type { SkillRecord, SkillStats } from "../src/types.js";
 
 const records: SkillRecord[] = [
-  { name: "alpha", path: "/fixtures/alpha/SKILL.md", description: "Use when doing alpha work here", triggerPhrases: ["doing alpha work"], terms: ["alpha"], mtimeMs: 1 },
-  { name: "beta", path: "/fixtures/beta/SKILL.md", description: "Use when doing beta work here", triggerPhrases: ["doing beta work"], terms: ["beta"], mtimeMs: 1 },
+  { name: "alpha", path: "/fixtures/alpha/SKILL.md", description: "Use when doing alpha work here", mtimeMs: 1, ...deriveRoutingFields("alpha", "Use when doing alpha work here") },
+  { name: "beta", path: "/fixtures/beta/SKILL.md", description: "Use when doing beta work here", mtimeMs: 1, ...deriveRoutingFields("beta", "Use when doing beta work here") },
 ];
 
 describe("renderReport", () => {
@@ -2317,6 +2317,17 @@ describe("renderReport", () => {
 
   it("handles an empty catalogue without throwing", () => {
     expect(renderReport([], new Map())).toContain("No skills loaded");
+  });
+
+  it("widens a column instead of breaking alignment on a large count", () => {
+    const stats = new Map<string, SkillStats>([["alpha", { injections: 1234567, reads: 89, blocks: 0 }]]);
+    const lines = renderReport(records, stats).split("\n");
+    const header = lines[0] ?? "";
+    const alphaRow = lines.find((line) => line.startsWith("alpha")) ?? "";
+    expect(alphaRow).toContain("1234567");
+    // Every row's column separators line up with the header's.
+    const separatorPositions = (line: string) => [...line].flatMap((ch, i) => (ch === "|" ? [i] : []));
+    expect(separatorPositions(alphaRow)).toEqual(separatorPositions(header));
   });
 });
 
@@ -2344,11 +2355,12 @@ Expected: FAIL — cannot find module `../src/report.js`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// src/report.ts
 import type { LintFinding } from "./doctor.js";
 import type { SkillRecord, SkillStats } from "./types.js";
 
 const EMPTY: SkillStats = { injections: 0, reads: 0, blocks: 0 };
+
+const COLUMNS = { skill: "skill", injected: "injected", read: "read", blocked: "blocked" } as const;
 
 function pad(value: string, width: number): string {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
@@ -2358,21 +2370,38 @@ function pad(value: string, width: number): string {
 export function renderReport(records: SkillRecord[], stats: Map<string, SkillStats>): string {
   if (records.length === 0) return "No skills loaded, so there is nothing to report.";
 
-  const nameWidth = Math.max(6, ...records.map((r) => r.name.length));
+  const sorted = [...records].sort((a, b) => a.name.localeCompare(b.name));
+  const rows = sorted.map((record) => {
+    const stat = stats.get(record.name) ?? EMPTY;
+    return {
+      name: record.name,
+      injections: String(stat.injections),
+      reads: String(stat.reads),
+      blocks: String(stat.blocks),
+      neverFired: stat.injections === 0 && stat.reads === 0,
+    };
+  });
+
+  // Widths come from the header label and the widest value, so a large count widens its column
+  // instead of breaking the alignment.
+  const widthOf = (label: string, values: string[]): number =>
+    Math.max(label.length, ...values.map((value) => value.length));
+  const nameWidth = widthOf(COLUMNS.skill, rows.map((row) => row.name));
+  const injectedWidth = widthOf(COLUMNS.injected, rows.map((row) => row.injections));
+  const readWidth = widthOf(COLUMNS.read, rows.map((row) => row.reads));
+
   const lines = [
-    `${pad("skill", nameWidth)} | injected | read | blocked`,
-    `${"-".repeat(nameWidth)}-+----------+------+--------`,
+    `${pad(COLUMNS.skill, nameWidth)} | ${pad(COLUMNS.injected, injectedWidth)} | ${pad(COLUMNS.read, readWidth)} | ${COLUMNS.blocked}`,
+    `${"-".repeat(nameWidth)}-+-${"-".repeat(injectedWidth)}-+-${"-".repeat(readWidth)}-+-${"-".repeat(COLUMNS.blocked.length)}`,
   ];
 
-  let neverFired = 0;
-  for (const record of [...records].sort((a, b) => a.name.localeCompare(b.name))) {
-    const stat = stats.get(record.name) ?? EMPTY;
-    if (stat.injections === 0 && stat.reads === 0) neverFired += 1;
+  for (const row of rows) {
     lines.push(
-      `${pad(record.name, nameWidth)} | ${pad(String(stat.injections), 8)} | ${pad(String(stat.reads), 4)} | ${stat.blocks}`,
+      `${pad(row.name, nameWidth)} | ${pad(row.injections, injectedWidth)} | ${pad(row.reads, readWidth)} | ${row.blocks}`,
     );
   }
 
+  const neverFired = rows.filter((row) => row.neverFired).length;
   lines.push("", `${neverFired} of ${records.length} skills have never fired.`);
   return lines.join("\n");
 }
@@ -2394,7 +2423,7 @@ export function renderDoctor(findings: LintFinding[]): string {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/report.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
 
