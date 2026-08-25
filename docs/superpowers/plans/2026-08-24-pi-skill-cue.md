@@ -3197,7 +3197,6 @@ git commit -m "test: add routing benchmark with invented corpus and committed ba
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/leaks.test.ts
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -3244,7 +3243,7 @@ describe("check-leaks", () => {
 
   it("still reports other lines in a file that contains a suppressed line", () => {
     const dir = fixture({
-      "src/a.ts": 'const ok = "x"; // leak-guard-allow\nconst bad = "person@example.com";\n',
+      "src/a.ts": 'const ok = "x"; // leak-guard-allow\nconst bad = "person@example.com";\n', // leak-guard-allow
     });
     const result = run(dir);
     expect(result.status).toBe(1);
@@ -3252,13 +3251,13 @@ describe("check-leaks", () => {
   });
 
   it("fails on an email address", () => {
-    const result = run(fixture({ "README.md": "contact person@example.com\n" }));
+    const result = run(fixture({ "README.md": "contact person@example.com\n" })); // leak-guard-allow
     expect(result.status).toBe(1);
     expect(result.output).toContain("email-address");
   });
 
   it("fails on a token-shaped string", () => {
-    const result = run(fixture({ "src/a.ts": 'const k = "sk-abcdefghijklmnopqrstuvwxyz012345";\n' }));
+    const result = run(fixture({ "src/a.ts": 'const k = "sk-abcdefghijklmnopqrstuvwxyz012345";\n' })); // leak-guard-allow
     expect(result.status).toBe(1);
     expect(result.output).toContain("credential-shape");
   });
@@ -3295,6 +3294,12 @@ describe("check-leaks", () => {
     expect(result.status).toBe(1);
     expect(result.output).toContain("strict mode");
   });
+
+  it("passes against this repository, which is the case that actually gates publishing", () => {
+    const result = run(process.cwd());
+    expect(result.output).toContain("clean");
+    expect(result.status).toBe(0);
+  }, 60000);
 });
 ```
 
@@ -3306,8 +3311,6 @@ Expected: FAIL — cannot find `scripts/check-leaks.mjs`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```js
-// scripts/check-leaks.mjs
-import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -3317,7 +3320,9 @@ const GENERIC = [
   { id: "email-address", regex: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   { id: "credential-shape", regex: /\b(?:sk|pk|ghp|gho|xox[abps])[-_][A-Za-z0-9_-]{20,}\b/ },
   { id: "private-ip", regex: /\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b/ },
-  { id: "internal-tld", regex: /\b[a-z0-9-]+\.(?:internal|corp|local|intranet)\b/i },
+  // Host-like only, and no bare ".local": mDNS names are rare in source, while ".local" collides
+  // with ordinary filenames such as this tool's own .leakpatterns.local.
+  { id: "internal-tld", regex: /(?<![\w.-])[a-z0-9][a-z0-9-]+\.(?:internal|corp|intranet)\b/i },
 ];
 
 const FORBIDDEN_FILES = [/(^|\/)\.env(\.|$)/, /(^|\/)auth\.json$/, /\.pem$/, /\.p12$/, /_rsa$/];
@@ -3334,15 +3339,20 @@ const root = dirIndex === -1 ? process.cwd() : args[dirIndex + 1];
 const strict = args.includes("--strict");
 
 function loadLocalPatterns() {
+  let contents;
   try {
-    return readFileSync(join(root, ".leakpatterns.local"), "utf8")
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"))
-      .map((term) => ({ id: `local-pattern:${term.slice(0, 4)}***`, regex: new RegExp(term, "i") }));
-  } catch {
+    contents = readFileSync(join(root, ".leakpatterns.local"), "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error(`check-leaks: could not read .leakpatterns.local (${error.code}); local patterns are NOT applied.`);
+    }
     return undefined;
   }
+  return contents
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((term) => ({ id: "local-pattern:<redacted>", regex: new RegExp(term, "i") }));
 }
 
 async function walk(dir) {
@@ -3418,7 +3428,7 @@ coverage/
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run tests/leaks.test.ts && npm run check:leaks`
-Expected: PASS, 10 tests, and `check-leaks: clean`.
+Expected: PASS, 11 tests, and `check-leaks: clean`.
 
 > The repo-wide `check:leaks` run scans this plan document too. The example finding inside it
 > carries the `leak-guard-allow` marker for the same reason the test fixture does: the guard has to

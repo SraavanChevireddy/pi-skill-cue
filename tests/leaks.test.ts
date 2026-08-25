@@ -44,7 +44,7 @@ describe("check-leaks", () => {
 
   it("still reports other lines in a file that contains a suppressed line", () => {
     const dir = fixture({
-      "src/a.ts": 'const ok = "x"; // leak-guard-allow\nconst bad = "person@example.com";\n',
+      "src/a.ts": 'const ok = "x"; // leak-guard-allow\nconst bad = "person@example.com";\n', // leak-guard-allow
     });
     const result = run(dir);
     expect(result.status).toBe(1);
@@ -52,13 +52,13 @@ describe("check-leaks", () => {
   });
 
   it("fails on an email address", () => {
-    const result = run(fixture({ "README.md": "contact person@example.com\n" }));
+    const result = run(fixture({ "README.md": "contact person@example.com\n" })); // leak-guard-allow
     expect(result.status).toBe(1);
     expect(result.output).toContain("email-address");
   });
 
   it("fails on a token-shaped string", () => {
-    const result = run(fixture({ "src/a.ts": 'const k = "sk-abcdefghijklmnopqrstuvwxyz012345";\n' }));
+    const result = run(fixture({ "src/a.ts": 'const k = "sk-abcdefghijklmnopqrstuvwxyz012345";\n' })); // leak-guard-allow
     expect(result.status).toBe(1);
     expect(result.output).toContain("credential-shape");
   });
@@ -95,4 +95,10 @@ describe("check-leaks", () => {
     expect(result.status).toBe(1);
     expect(result.output).toContain("strict mode");
   });
+
+  it("passes against this repository, which is the case that actually gates publishing", () => {
+    const result = run(process.cwd());
+    expect(result.output).toContain("clean");
+    expect(result.status).toBe(0);
+  }, 60000);
 });

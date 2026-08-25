@@ -7,7 +7,9 @@ const GENERIC = [
   { id: "email-address", regex: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   { id: "credential-shape", regex: /\b(?:sk|pk|ghp|gho|xox[abps])[-_][A-Za-z0-9_-]{20,}\b/ },
   { id: "private-ip", regex: /\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b/ },
-  { id: "internal-tld", regex: /\b[a-z0-9-]+\.(?:internal|corp|local|intranet)\b/i },
+  // Host-like only, and no bare ".local": mDNS names are rare in source, while ".local" collides
+  // with ordinary filenames such as this tool's own .leakpatterns.local.
+  { id: "internal-tld", regex: /(?<![\w.-])[a-z0-9][a-z0-9-]+\.(?:internal|corp|intranet)\b/i },
 ];
 
 const FORBIDDEN_FILES = [/(^|\/)\.env(\.|$)/, /(^|\/)auth\.json$/, /\.pem$/, /\.p12$/, /_rsa$/];
@@ -24,15 +26,20 @@ const root = dirIndex === -1 ? process.cwd() : args[dirIndex + 1];
 const strict = args.includes("--strict");
 
 function loadLocalPatterns() {
+  let contents;
   try {
-    return readFileSync(join(root, ".leakpatterns.local"), "utf8")
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"))
-      .map((term) => ({ id: `local-pattern:${term.slice(0, 4)}***`, regex: new RegExp(term, "i") }));
-  } catch {
+    contents = readFileSync(join(root, ".leakpatterns.local"), "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error(`check-leaks: could not read .leakpatterns.local (${error.code}); local patterns are NOT applied.`);
+    }
     return undefined;
   }
+  return contents
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((term) => ({ id: "local-pattern:<redacted>", regex: new RegExp(term, "i") }));
 }
 
 async function walk(dir) {
