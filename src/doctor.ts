@@ -1,3 +1,4 @@
+import { tokenize } from "./text.js";
 import type { SkillRecord, SkillStats } from "./types.js";
 
 export type LintCode =
@@ -27,8 +28,13 @@ function jaccard(a: string[], b: string[]): number {
   return shared / (setA.size + setB.size - shared);
 }
 
-function descriptionTerms(description: string): string[] {
-  return description.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
+/**
+ * Description terms only, via the router's own tokenizer so filler words cannot inflate
+ * similarity. Deliberately not `record.terms`, which folds in the skill name: two skills with the
+ * same description and different names genuinely overlap, and that is what this rule must catch.
+ */
+function descriptionTerms(record: SkillRecord): string[] {
+  return tokenize(record.description);
 }
 
 function suggestionFor(record: SkillRecord, codes: LintCode[]): string {
@@ -41,7 +47,7 @@ function suggestionFor(record: SkillRecord, codes: LintCode[]): string {
   if (codes.includes("never-read")) {
     return "The router surfaces this skill but the model declines to read it. Sharpen the trigger clause, or add a gate if it is mandatory.";
   }
-  return `Include the words from the skill name in the description so both match paths agree.`;
+  return "Include the words from the skill name in the description so both match paths agree.";
 }
 
 /** Lint a catalogue for routability problems. Pure given stats. */
@@ -57,9 +63,10 @@ export function lintCatalog(
     if (record.description.trim().length < MIN_DESCRIPTION_LENGTH) codes.push("description-too-short");
     if (record.triggerPhrases.length === 0) codes.push("no-trigger-clause");
 
+    // All-pairs comparison. Catalogues are tens of skills, so O(n^2) is not worth avoiding here.
     for (const other of records) {
       if (other.name === record.name) continue;
-      if (jaccard(descriptionTerms(record.description), descriptionTerms(other.description)) >= OVERLAP_THRESHOLD) {
+      if (jaccard(descriptionTerms(record), descriptionTerms(other)) >= OVERLAP_THRESHOLD) {
         codes.push("overlapping-description");
         break;
       }
@@ -68,9 +75,9 @@ export function lintCatalog(
     const stat = stats.get(record.name);
     if (stat && stat.injections >= NEVER_READ_INJECTIONS && stat.reads === 0) codes.push("never-read");
 
-    const nameTerms = descriptionTerms(record.name);
-    const descTerms = descriptionTerms(record.description);
-    if (nameTerms.length > 0 && !nameTerms.some((t) => descTerms.includes(t))) {
+    const nameTerms = tokenize(record.name);
+    const descTerms = new Set(descriptionTerms(record));
+    if (nameTerms.length > 0 && !nameTerms.some((term) => descTerms.has(term))) {
       codes.push("name-description-disjoint");
     }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { deriveRoutingFields } from "../src/catalog.js";
 import { lintCatalog } from "../src/doctor.js";
 import type { SkillRecord, SkillStats } from "../src/types.js";
 
@@ -7,9 +8,8 @@ function rec(name: string, description: string): SkillRecord {
     name,
     path: `/fixtures/${name}/SKILL.md`,
     description,
-    triggerPhrases: description.toLowerCase().includes("use when") ? ["something specific here"] : [],
-    terms: [...new Set(`${name} ${description}`.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2))],
     mtimeMs: 1,
+    ...deriveRoutingFields(name, description),
   };
 }
 
@@ -55,5 +55,33 @@ describe("lintCatalog", () => {
       stats,
     );
     expect(findings).toEqual([]);
+  });
+
+  it("does not call two skills overlapping merely because both say 'use when'", () => {
+    const findings = lintCatalog(
+      [
+        rec("invoice-parsing", "Use when extracting fields from an invoice document or receipt"),
+        rec("release-checklist", "Use when cutting a release, tagging a version, or writing notes"),
+      ],
+      noStats,
+    );
+    expect(findings.some((f) => f.codes.includes("overlapping-description"))).toBe(false);
+  });
+
+  it("reports a finding for each skill in an overlapping pair", () => {
+    const findings = lintCatalog(
+      [
+        rec("alpha-review", "Use when reviewing a pull request and leaving comments on the diff"),
+        rec("beta-review", "Use when reviewing a pull request and leaving comments on the diff"),
+      ],
+      noStats,
+    );
+    expect(findings.map((f) => f.skill).sort()).toEqual(["alpha-review", "beta-review"]);
+  });
+
+  it("does not flag a skill that has been read at least once", () => {
+    const stats = new Map<string, SkillStats>([["epsilon", { injections: 9, reads: 1, blocks: 0 }]]);
+    const findings = lintCatalog([rec("epsilon", "Use when handling a documented epsilon situation")], stats);
+    expect(findings.some((f) => f.codes.includes("never-read"))).toBe(false);
   });
 });
