@@ -1,0 +1,10 @@
+# .leakpatterns.example
+# Copy to .leakpatterns.local (gitignored) and add identity- or employer-specific terms,
+# one case-insensitive regex per line. These deliberately do not live in the repository:
+#
+#   your-employer-name
+#   your-github-username
+#   internal-hostname\.example
+#
+# Blank lines and lines starting with # are ignored. Each remaining line is compiled
+# as a case-insensitive regular expression and checked against every source line.
