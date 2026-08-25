@@ -2,6 +2,7 @@ import { scoreSkills } from "../src/scorer.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 import { CORPUS } from "./corpus.js";
 import { CASES } from "./cases.js";
+import baseline from "./baseline.json" with { type: "json" };
 
 export interface BenchResult {
   precisionAt1: number;
@@ -64,4 +65,23 @@ if (isMain) {
   console.log(`recall@3:          ${result.recallAt3}`);
   console.log(`falsePositiveRate: ${result.falsePositiveRate}`);
   console.log(`hard precision@1:  ${result.hardPrecisionAt1} (${result.hardCases} cases)`);
+
+  // Enforce here as well as in tests/bench.test.ts, so the gate survives a change to the suite.
+  const regressions = [
+    result.precisionAt1 < baseline.precisionAt1 ? `precision@1 ${result.precisionAt1} < ${baseline.precisionAt1}` : "",
+    result.recallAt3 < baseline.recallAt3 ? `recall@3 ${result.recallAt3} < ${baseline.recallAt3}` : "",
+    result.falsePositiveRate > baseline.falsePositiveRate
+      ? `falsePositiveRate ${result.falsePositiveRate} > ${baseline.falsePositiveRate}`
+      : "",
+    result.hardPrecisionAt1 < baseline.hardPrecisionAt1
+      ? `hard precision@1 ${result.hardPrecisionAt1} < ${baseline.hardPrecisionAt1}`
+      : "",
+  ].filter(Boolean);
+
+  if (regressions.length > 0) {
+    console.error(`\nbench: regression against bench/baseline.json`);
+    for (const regression of regressions) console.error(`  ${regression}`);
+    process.exit(1);
+  }
+  console.log("\nbench: at or above baseline");
 }

@@ -12,8 +12,8 @@ describe("README", () => {
 
   it("publishes the current benchmark numbers", () => {
     const result = evaluate();
-    expect(readme).toContain(String(result.precisionAt1));
-    expect(readme).toContain(String(result.recallAt3));
+    expect(readme).toMatch(new RegExp(`Precision@1[^\\n|]*\\|[^\\n|]*${result.precisionAt1}`, "i"));
+    expect(readme).toMatch(new RegExp(`Recall@3[^\\n|]*\\|[^\\n|]*${result.recallAt3}`, "i"));
   });
 
   it("states the privacy position", () => {

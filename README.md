@@ -63,7 +63,10 @@ up, not excluded. An optional model-assisted escalation for ambiguous cases is
 deferred until the lexical approach alone is shown to be insufficient in practice.
 
 Most routing packages assert that they select correctly. This one publishes a number
-and fails CI on regression against it.
+and enforces it: `npm run bench` recomputes these numbers against the committed
+baseline in [`bench/baseline.json`](bench/baseline.json) and exits non-zero on
+regression, and [`tests/bench.test.ts`](tests/bench.test.ts) asserts the same
+baseline in CI.
 
 ## Configuration
 
@@ -77,13 +80,13 @@ wins per top-level key. Absent config is valid and yields advisory-only behaviou
   "threshold": 0.35,
   "verbose": false,
   "mute": ["some-noisy-skill"],
-  "triggers": { "ticket-workflow": ["\\b[A-Z]{2,}-\\d{3,}\\b"] },
+  "triggers": { "ticket-intake": ["\\b[A-Z]{2,}-\\d{3,}\\b"] },
   "gates": { "test-driven-development": { "tools": ["write", "edit"] } },
   "escalate": { "enabled": false, "model": null }
 }
 ```
 
-`triggers.ticket-workflow` above matches ticket keys shaped like `ABC-123`. Unknown
+`triggers.ticket-intake` above matches ticket keys shaped like `ABC-123`. Unknown
 keys are ignored; invalid values fall back to defaults rather than throwing.
 
 ## Commands
