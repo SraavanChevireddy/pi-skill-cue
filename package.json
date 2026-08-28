@@ -1,6 +1,6 @@
 {
   "name": "pi-skill-cue",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Skill router for pi. Matches every prompt to the right skill, injects it where the model will actually see it, and optionally blocks work until it is read.",
   "license": "MIT",
   "type": "module",

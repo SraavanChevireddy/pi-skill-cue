@@ -33,9 +33,12 @@ describe("benchmark", () => {
     expect(result.falsePositiveRate).toBeLessThanOrEqual(baseline.falsePositiveRate);
   });
 
-  it("meets the committed baseline on the hard subset", () => {
+  it("matches the committed baseline on the hard subset exactly", () => {
+    // Asserted exactly, not as a floor. The committed value is currently 0, and
+    // `>= 0` cannot fail, so a floor here would silently permit any change. Pinning it means an
+    // improvement is noticed and has to be recorded deliberately, and a regression cannot hide.
     const result = evaluate();
-    expect(result.hardPrecisionAt1).toBeGreaterThanOrEqual(baseline.hardPrecisionAt1);
+    expect(result.hardPrecisionAt1).toBe(baseline.hardPrecisionAt1);
   });
 
   it("has enough hard cases for that number to mean something", () => {
